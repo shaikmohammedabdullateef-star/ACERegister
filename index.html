@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ACE Register</title>
+<meta name="theme-color" content="#24352B" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="ACE Register" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+
+<header class="cover">
+  <div class="cover-inner">
+    <div>
+      <div class="brand">
+        <img src="./logo-small.png" alt="ACE Skills logo" style="width:34px;height:34px;border-radius:6px;background:#fff" />
+        <h1>ACE SKILLS DEVELOPMENT CENTER</h1>
+      </div>
+      <p class="tagline">Lead &amp; Student Register — IELTS · PTE · Spoken English</p>
+    </div>
+    <div class="header-actions">
+      <span id="authArea"></span>
+      <button class="btn btn-ghost-dark" id="customizeBtn">&#9881;&#65039; Customize</button>
+      <button class="btn btn-ghost-dark" id="exportBtn">&#11015;&#65039; Export</button>
+      <button class="btn btn-brass" id="addBtn">&#65291; Add Entry</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="saveError" class="save-error" style="display:none">Couldn't save on this device just now — your last change may not have persisted.</div>
+  <div id="bannerHost"></div>
+  <div class="stats" id="statsRow"></div>
+  <div class="toolbar" id="toolbar"></div>
+  <div id="recordsWrap"></div>
+</main>
+
+<div id="modalHost"></div>
+<div id="settingsHost"></div>
+<div id="attendanceHost"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+<script src="./firebase-config.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
