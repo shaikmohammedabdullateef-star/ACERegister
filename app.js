@@ -35,6 +35,7 @@ function emptyRecord() {
     id: uid(), name: "", contact: "", email: "", leadSource: state.sources[0] || "", courseInterest: state.courses[0] || "",
     feeOffered: "", feedback: "", followedUp: "Pending", status: "New Lead",
     joiningDate: "", renewalDate: "", notes: "", createdAt: new Date().toISOString().slice(0, 10),
+    createdBy: null, createdByName: null,
   };
 }
 function daysUntil(dateStr) {
@@ -50,17 +51,31 @@ function fmtDate(dateStr) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function showError(msg) {
+  const el = document.getElementById("saveError");
+  el.textContent = msg;
+  el.style.display = "block";
+}
+function clearError() {
+  document.getElementById("saveError").style.display = "none";
+}
 
 /* ---------- persistence: local device + shared team cloud backup ---------- */
 let cloudEnabled = false;
 let currentUser = null;
-let unsubRegister = null;
-let unsubAttendance = null;
-let attendanceToday = []; // shared punch records for today
-let attendanceOpen = false;
+let unsubRecords = null;
+let unsubSettings = null;
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
+}
+
+/* Only the tutor who created a record — or anyone when the app is running
+   in local/offline mode — can edit or delete it. */
+function canEdit(r) {
+  if (!cloudEnabled || !currentUser) return true;
+  if (!r.createdBy) return true; // legacy/local entries with no recorded owner
+  return r.createdBy === currentUser.uid;
 }
 
 function initCloud() {
@@ -75,13 +90,12 @@ function initCloud() {
     firebase.auth().onAuthStateChanged((user) => {
       currentUser = user;
       renderAuthUI();
-      if (unsubRegister) { unsubRegister(); unsubRegister = null; }
-      if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
+      if (unsubRecords) { unsubRecords(); unsubRecords = null; }
+      if (unsubSettings) { unsubSettings(); unsubSettings = null; }
       if (user) {
-        subscribeSharedRegister();
-        subscribeAttendance();
+        subscribeSharedRecords();
+        subscribeSharedSettings();
       } else {
-        attendanceToday = [];
         load();
         render();
       }
@@ -95,141 +109,99 @@ function initCloud() {
 function signIn() {
   const provider = new firebase.auth.GoogleAuthProvider();
   firebase.auth().signInWithPopup(provider).catch((err) => {
-    // Some in-app browsers (e.g. opened from WhatsApp/Instagram) block popups —
-    // fall back to redirect in that case only.
     if (err && (err.code === "auth/popup-blocked" || err.code === "auth/operation-not-supported-in-this-environment")) {
       firebase.auth().signInWithRedirect(provider);
       return;
     }
     if (err && err.code === "auth/popup-closed-by-user") return;
-    document.getElementById("saveError").textContent = "Google sign-in didn't go through — please try again.";
-    document.getElementById("saveError").style.display = "block";
+    showError("Google sign-in didn't go through — please try again.");
   });
 }
 function signOutUser() {
   firebase.auth().signOut();
 }
 
-/* Shared team register: everyone signed in reads/writes the SAME document,
-   updated live for the whole team (add/edit/delete syncs to everyone). */
-function subscribeSharedRegister() {
-  unsubRegister = firebase.firestore().collection("ace_shared").doc("register")
+function handleShareError(err) {
+  if (err && err.code === "permission-denied") {
+    showError("This Google account isn't authorized for ACE Register. Ask the admin to add your email, or sign in with an approved account.");
+    firebase.auth().signOut();
+    return true;
+  }
+  return false;
+}
+
+/* Shared team register: every student/lead is its own document, tagged with
+   who created it. Everyone signed in sees everyone's entries live, but only
+   the creator (or anyone when offline) can edit or delete a given one. */
+function subscribeSharedRecords() {
+  unsubRecords = firebase.firestore().collection("ace_records")
     .onSnapshot((snap) => {
-      if (snap.exists) {
-        const data = snap.data();
-        state.records = data.records || [];
-        state.sources = data.sources?.length ? data.sources : [...DEFAULT_SOURCES];
-        state.courses = data.courses?.length ? data.courses : [...DEFAULT_COURSES];
-      } else {
-        // first team member ever to sign in: seed the shared register from this device
-        load();
-        pushSharedRegister();
-      }
-      renderRenewalBanner(); renderStats(); renderToolbar(); renderRecords(); renderModal(); renderSettings();
+      state.records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderRenewalBanner(); renderStats(); renderToolbar(); renderRecords(); renderModal();
       maybeNotifyRenewals();
-    }, () => {
-      document.getElementById("saveError").textContent = "Couldn't reach the shared team data — showing what's saved on this device.";
-      document.getElementById("saveError").style.display = "block";
+      clearError();
+    }, (err) => {
+      if (handleShareError(err)) return;
+      showError("Couldn't reach the shared team data — showing what's saved on this device.");
       load(); render();
     });
 }
 
-let sharedSaveTimer = null;
-function pushSharedRegister() {
-  clearTimeout(sharedSaveTimer);
-  sharedSaveTimer = setTimeout(() => {
-    firebase.firestore().collection("ace_shared").doc("register").set({
-      records: state.records, sources: state.sources, courses: state.courses,
-      updatedAt: new Date().toISOString(),
-      updatedBy: currentUser ? (currentUser.displayName || currentUser.email) : "device",
-    }).catch(() => {
-      document.getElementById("saveError").textContent = "Couldn't sync this change to the team — try again.";
-      document.getElementById("saveError").style.display = "block";
-    });
-  }, 350);
-}
-
-/* Attendance: every signed-in trainer punches in/out; everyone sees today's log live. */
-function subscribeAttendance() {
-  unsubAttendance = firebase.firestore().collection("ace_attendance")
-    .where("date", "==", todayStr())
+function subscribeSharedSettings() {
+  unsubSettings = firebase.firestore().collection("ace_shared").doc("settings")
     .onSnapshot((snap) => {
-      attendanceToday = snap.docs.map((d) => d.data()).sort((a, b) => (a.punchInTime || "").localeCompare(b.punchInTime || ""));
-      if (attendanceOpen) renderAttendance();
-    }, () => {});
+      if (snap.exists) {
+        const data = snap.data();
+        state.sources = data.sources?.length ? data.sources : [...DEFAULT_SOURCES];
+        state.courses = data.courses?.length ? data.courses : [...DEFAULT_COURSES];
+      } else {
+        pushSharedSettings();
+      }
+      renderToolbar(); renderRecords(); renderSettings();
+    }, (err) => {
+      if (handleShareError(err)) return;
+    });
 }
 
-function punchIn() {
-  if (!currentUser) return;
-  const id = `${todayStr()}_${currentUser.uid}`;
-  firebase.firestore().collection("ace_attendance").doc(id).set({
-    uid: currentUser.uid, name: currentUser.displayName || currentUser.email, email: currentUser.email,
-    date: todayStr(), punchInTime: new Date().toISOString(), punchOutTime: null, status: "present",
-  }, { merge: true });
-}
-function punchOut() {
-  if (!currentUser) return;
-  const id = `${todayStr()}_${currentUser.uid}`;
-  firebase.firestore().collection("ace_attendance").doc(id).set({
-    punchOutTime: new Date().toISOString(),
-  }, { merge: true });
-}
-function markHoliday() {
-  if (!currentUser) return;
-  const id = `${todayStr()}_${currentUser.uid}`;
-  firebase.firestore().collection("ace_attendance").doc(id).set({
-    uid: currentUser.uid, name: currentUser.displayName || currentUser.email, email: currentUser.email,
-    date: todayStr(), punchInTime: null, punchOutTime: null, status: "holiday",
-  }, { merge: true });
+function pushSharedSettings() {
+  firebase.firestore().collection("ace_shared").doc("settings").set({
+    sources: state.sources, courses: state.courses,
+    updatedAt: new Date().toISOString(),
+    updatedBy: currentUser ? (currentUser.displayName || currentUser.email) : "device",
+  }).catch(() => showError("Couldn't sync this change to the team — try again."));
 }
 
-function fmtTime(iso) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
-}
-function hoursBetween(inIso, outIso) {
-  if (!inIso || !outIso) return 0;
-  return Math.max(0, (new Date(outIso) - new Date(inIso)) / 3600000);
+/* Writes a single record document. Ownership fields are only ever set on
+   create and are never touched by an edit, so the original tutor stays the
+   owner for the life of the entry. */
+function writeRecord(record, isNew) {
+  if (!cloudEnabled || !currentUser) {
+    const exists = state.records.some((x) => x.id === record.id);
+    state.records = exists ? state.records.map((x) => (x.id === record.id ? record : x)) : [record, ...state.records];
+    render();
+    return;
+  }
+  if (isNew) {
+    record.createdBy = currentUser.uid;
+    record.createdByName = currentUser.displayName || currentUser.email;
+  }
+  firebase.firestore().collection("ace_records").doc(record.id).set(record)
+    .catch((err) => {
+      if (handleShareError(err)) return;
+      showError(isNew ? "Couldn't add this entry — try again." : "You can only edit entries you added.");
+    });
 }
 
-/* ---------- monthly report: attendance %, holidays, hours per tutor ---------- */
-let reportView = false;
-let reportLoading = false;
-let reportData = []; // [{uid, name, present, holiday, totalHours}]
-
-function monthBounds() {
-  const now = new Date();
-  const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-  const end = todayStr();
-  return { start, end };
-}
-
-function loadMonthlyReport() {
-  if (!cloudEnabled) return;
-  reportLoading = true;
-  renderAttendance();
-  const { start, end } = monthBounds();
-  firebase.firestore().collection("ace_attendance")
-    .where("date", ">=", start).where("date", "<=", end)
-    .get()
-    .then((snap) => {
-      const byUser = {};
-      snap.docs.forEach((d) => {
-        const a = d.data();
-        if (!byUser[a.uid]) byUser[a.uid] = { uid: a.uid, name: a.name, present: 0, holiday: 0, totalHours: 0 };
-        if (a.status === "holiday") byUser[a.uid].holiday += 1;
-        else if (a.punchInTime) {
-          byUser[a.uid].present += 1;
-          byUser[a.uid].totalHours += hoursBetween(a.punchInTime, a.punchOutTime);
-        }
-      });
-      reportData = Object.values(byUser).sort((a, b) => b.present - a.present);
-      reportLoading = false;
-      renderAttendance();
-    })
-    .catch(() => {
-      reportLoading = false;
-      renderAttendance();
+function deleteRecordRemote(id) {
+  if (!cloudEnabled || !currentUser) {
+    state.records = state.records.filter((x) => x.id !== id);
+    render();
+    return;
+  }
+  firebase.firestore().collection("ace_records").doc(id).delete()
+    .catch((err) => {
+      if (handleShareError(err)) return;
+      showError("You can only delete entries you added.");
     });
 }
 
@@ -238,85 +210,11 @@ function renderAuthUI() {
   if (!host) return;
   if (!cloudEnabled) { host.innerHTML = ""; return; }
   if (currentUser) {
-    host.innerHTML = `
-      <button class="btn btn-ghost-dark" id="attendanceBtn">&#128337; Attendance</button>
-      <button class="btn btn-ghost-dark" id="signOutBtn" title="${esc(currentUser.email || "")}">&#9729;&#65039; ${esc(currentUser.displayName ? currentUser.displayName.split(" ")[0] : "Signed in")} · Sign out</button>`;
+    host.innerHTML = `<button class="btn btn-ghost-dark" id="signOutBtn" title="${esc(currentUser.email || "")}">&#9729;&#65039; ${esc(currentUser.displayName ? currentUser.displayName.split(" ")[0] : "Signed in")} · Sign out</button>`;
     document.getElementById("signOutBtn").addEventListener("click", signOutUser);
-    document.getElementById("attendanceBtn").addEventListener("click", () => { attendanceOpen = true; renderAttendance(); });
   } else {
     host.innerHTML = `<button class="btn btn-ghost-dark" id="signInBtn">&#128231; Sign in with Google</button>`;
     document.getElementById("signInBtn").addEventListener("click", signIn);
-  }
-}
-
-function renderAttendance() {
-  const host = document.getElementById("attendanceHost");
-  if (!attendanceOpen) { host.innerHTML = ""; return; }
-  const mine = currentUser ? attendanceToday.find((a) => a.uid === currentUser.uid) : null;
-
-  const todayRows = attendanceToday.map((a) => `
-    <div class="record" style="padding:9px 12px">
-      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
-        <span style="font-weight:700">${esc(a.name)}</span>
-        ${a.status === "holiday"
-          ? `<span class="stamp" style="color:#8B5CF6;border-color:#8B5CF6">On Holiday</span>`
-          : `<span style="font-size:12px;color:#5c5386">In: <b>${fmtTime(a.punchInTime)}</b> &nbsp; Out: <b>${fmtTime(a.punchOutTime)}</b></span>`}
-      </div>
-    </div>`).join("") || `<div class="empty" style="padding:24px"><p>No punches yet today.</p></div>`;
-
-  const monthLabel = new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" });
-  const reportRows = reportLoading
-    ? `<div class="empty" style="padding:24px"><p>Loading report…</p></div>`
-    : (reportData.map((u) => {
-        const tracked = u.present + u.holiday;
-        const pct = tracked ? Math.round((u.present / tracked) * 100) : 0;
-        const avgHrs = u.present ? (u.totalHours / u.present) : 0;
-        return `<div class="record" style="padding:10px 12px">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-            <span style="font-weight:700">${esc(u.name)}</span>
-            <span class="stamp" style="color:${pct >= 90 ? "#12A594" : pct >= 75 ? "#F5A623" : "#E64A6B"};border-color:${pct >= 90 ? "#12A594" : pct >= 75 ? "#F5A623" : "#E64A6B"}">${pct}% present</span>
-          </div>
-          <div style="font-size:12px;color:#5c5386;margin-top:4px">
-            &#9989; ${u.present} day${u.present === 1 ? "" : "s"} present &nbsp; &#127796; ${u.holiday} holiday${u.holiday === 1 ? "" : "s"} &nbsp; &#8987; ${u.totalHours.toFixed(1)}h total (avg ${avgHrs.toFixed(1)}h/day)
-          </div>
-        </div>`;
-      }).join("") || `<div class="empty" style="padding:24px"><p>No attendance recorded this month yet.</p></div>`);
-
-  host.innerHTML = `<div class="overlay" id="attendanceOverlay">
-    <div class="modal" style="max-width:480px">
-      <div class="modal-head"><h2>Trainer Attendance</h2><button class="icon-btn" id="attendanceClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
-
-      <div class="tabs" style="margin-bottom:12px">
-        <button class="tab ${!reportView ? "active" : ""}" style="${!reportView ? "background:var(--ink)" : ""}" id="tabToday">Today</button>
-        <button class="tab ${reportView ? "active" : ""}" style="${reportView ? "background:var(--ink)" : ""}" id="tabReport">Monthly Report</button>
-      </div>
-
-      ${!reportView ? `
-        <div style="display:flex;gap:8px;margin-bottom:14px">
-          <button class="btn btn-brass" id="punchInBtn" style="flex:1;justify-content:center;padding:10px" ${mine && (mine.punchInTime || mine.status === "holiday") ? "disabled" : ""}>&#9203; Punch In</button>
-          <button class="btn btn-light" id="punchOutBtn" style="flex:1;justify-content:center;padding:10px" ${!mine || !mine.punchInTime || mine.punchOutTime ? "disabled" : ""}>&#128683; Punch Out</button>
-        </div>
-        <button class="btn btn-light" id="holidayBtn" style="width:100%;justify-content:center;padding:8px;margin-bottom:14px" ${mine && (mine.punchInTime || mine.status === "holiday") ? "disabled" : ""}>&#127796; Mark Today as Holiday / Leave</button>
-        <div style="font-size:12px;font-weight:700;color:#5c5386;margin-bottom:6px">Today's log (shared, all trainers)</div>
-        <div style="display:flex;flex-direction:column;gap:6px">${todayRows}</div>
-      ` : `
-        <div style="font-size:12px;font-weight:700;color:#5c5386;margin-bottom:6px">${monthLabel} — attendance %, holidays &amp; hours per tutor</div>
-        <div style="display:flex;flex-direction:column;gap:6px">${reportRows}</div>
-      `}
-
-      <div class="modal-actions"><button class="btn btn-brass" id="attendanceDone">Done</button></div>
-    </div>
-  </div>`;
-
-  document.getElementById("attendanceOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "attendanceOverlay") { attendanceOpen = false; renderAttendance(); } });
-  document.getElementById("attendanceClose").addEventListener("click", () => { attendanceOpen = false; renderAttendance(); });
-  document.getElementById("attendanceDone").addEventListener("click", () => { attendanceOpen = false; renderAttendance(); });
-  document.getElementById("tabToday").addEventListener("click", () => { reportView = false; renderAttendance(); });
-  document.getElementById("tabReport").addEventListener("click", () => { reportView = true; loadMonthlyReport(); });
-  if (!reportView) {
-    document.getElementById("punchInBtn").addEventListener("click", punchIn);
-    document.getElementById("punchOutBtn").addEventListener("click", punchOut);
-    document.getElementById("holidayBtn").addEventListener("click", markHoliday);
   }
 }
 
@@ -324,12 +222,9 @@ function save() {
   try {
     localStorage.setItem("ace_records", JSON.stringify(state.records));
     localStorage.setItem("ace_settings", JSON.stringify({ sources: state.sources, courses: state.courses }));
-    document.getElementById("saveError").style.display = "none";
   } catch (e) {
-    document.getElementById("saveError").textContent = "Couldn't save on this device just now — your last change may not have persisted.";
-    document.getElementById("saveError").style.display = "block";
+    showError("Couldn't save on this device just now — your last change may not have persisted.");
   }
-  if (cloudEnabled && currentUser) pushSharedRegister();
 }
 function load() {
   try {
@@ -506,8 +401,8 @@ function renderRecords() {
     document.getElementById(`edit-${r.id}`)?.addEventListener("click", () => openEdit(r.id));
     document.getElementById(`del-${r.id}`)?.addEventListener("click", () => { state.confirmDeleteId = r.id; renderRecords(); });
     document.getElementById(`delyes-${r.id}`)?.addEventListener("click", () => {
-      state.records = state.records.filter((x) => x.id !== r.id);
-      state.confirmDeleteId = null; render();
+      deleteRecordRemote(r.id);
+      state.confirmDeleteId = null;
     });
     document.getElementById(`delno-${r.id}`)?.addEventListener("click", () => { state.confirmDeleteId = null; renderRecords(); });
   });
@@ -521,11 +416,20 @@ function recordCardHTML(r) {
   const renewIn = daysUntil(r.renewalDate);
   const renewSoon = renewIn !== null && renewIn <= 30 && r.status === "Enrolled";
   const renewColor = renewIn < 0 ? "#E64A6B" : "#F5A623";
-  const actions = state.confirmDeleteId === r.id
-    ? `<button class="icon-btn" id="delyes-${r.id}" style="color:#E64A6B;border-color:#E64A6B33">&#10003;</button>
-       <button class="icon-btn" id="delno-${r.id}" style="color:#8378B0;border-color:#8378B033">&#10005;</button>`
-    : `<button class="icon-btn" id="edit-${r.id}" style="color:#4C4CFF;border-color:#4C4CFF33">&#9998;</button>
+  const editable = canEdit(r);
+
+  let actions;
+  if (state.confirmDeleteId === r.id) {
+    actions = `<button class="icon-btn" id="delyes-${r.id}" style="color:#E64A6B;border-color:#E64A6B33">&#10003;</button>
+       <button class="icon-btn" id="delno-${r.id}" style="color:#8378B0;border-color:#8378B033">&#10005;</button>`;
+  } else if (editable) {
+    actions = `<button class="icon-btn" id="edit-${r.id}" style="color:#4C4CFF;border-color:#4C4CFF33">&#9998;</button>
        <button class="icon-btn" id="del-${r.id}" style="color:#E64A6B;border-color:#E64A6B33">&#128465;</button>`;
+  } else {
+    actions = `<span class="icon-btn" style="color:#8378B0;border-color:#8378B033;cursor:default" title="Only ${esc(r.createdByName || "the tutor who added this")} can edit this entry">&#128274;</span>`;
+  }
+
+  const ownerNote = (cloudEnabled && r.createdByName) ? `<span class="meta-item" style="opacity:.75">&#128100; Added by ${esc(r.createdByName)}</span>` : "";
 
   return `<div class="record" style="--course-color:${cc}">
     <div class="record-top">
@@ -540,6 +444,7 @@ function recordCardHTML(r) {
           <span class="meta-item">&#127991;&#65039; ${esc(r.leadSource)}</span>
           <span class="meta-item course-tag" style="--course-color:${cc}">&#128214; ${esc(r.courseInterest)}</span>
           ${r.feeOffered ? `<span class="meta-item">&#8377; ${esc(r.feeOffered)}</span>` : ""}
+          ${ownerNote}
         </div>
         ${r.feedback ? `<div class="feedback-row">&#128172; <span>${esc(r.feedback)}</span></div>` : ""}
       </div>
@@ -555,7 +460,12 @@ function recordCardHTML(r) {
 
 /* ---------- add/edit modal ---------- */
 function openAdd() { state.editing = emptyRecord(); renderModal(); }
-function openEdit(id) { state.editing = { ...state.records.find((r) => r.id === id) }; renderModal(); }
+function openEdit(id) {
+  const r = state.records.find((x) => x.id === id);
+  if (!r || !canEdit(r)) return;
+  state.editing = { ...r };
+  renderModal();
+}
 function closeModal() { state.editing = null; renderModal(); }
 
 function renderModal() {
@@ -615,10 +525,9 @@ function renderModal() {
       feedback: document.getElementById("f_feedback").value,
       notes: document.getElementById("f_notes").value,
     };
-    const exists = state.records.some((x) => x.id === updated.id);
-    state.records = exists ? state.records.map((x) => (x.id === updated.id ? updated : x)) : [updated, ...state.records];
+    writeRecord(updated, isNew);
     state.editing = null;
-    render();
+    renderModal();
   });
 }
 
@@ -634,7 +543,7 @@ function renderSettings() {
   host.innerHTML = `<div class="overlay" id="settingsOverlay">
     <div class="modal" style="max-width:420px">
       <div class="modal-head"><h2>Customize Register</h2><button class="icon-btn" id="settingsClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
-      <p style="font-size:12px;color:#8a8470;margin-top:0">Add your own lead platforms or course names, or remove ones you don't use.</p>
+      <p style="font-size:12px;color:#8a8470;margin-top:0">Add your own lead platforms or course names, or remove ones you don't use. Shared with the whole team.</p>
       <div style="font-size:12.5px;font-weight:700;color:#5c5648;margin-bottom:6px">Lead sources</div>
       <div class="chips">${sourceChips}</div>
       <div class="add-row"><input id="newSourceInput" value="${esc(newSourceVal)}" placeholder="e.g. YouTube" /><button class="btn btn-light" id="addSourceBtn">+</button></div>
@@ -654,25 +563,32 @@ function renderSettings() {
   document.getElementById("addSourceBtn").addEventListener("click", () => {
     const v = newSourceVal.trim();
     if (v && !state.sources.includes(v)) state.sources.push(v);
-    newSourceVal = ""; render(); settingsOpen = true; renderSettings();
+    newSourceVal = ""; commitSettings();
   });
   document.getElementById("addCourseBtn").addEventListener("click", () => {
     const v = newCourseVal.trim();
     if (v && !state.courses.includes(v)) state.courses.push(v);
-    newCourseVal = ""; render(); settingsOpen = true; renderSettings();
+    newCourseVal = ""; commitSettings();
   });
   document.querySelectorAll("[data-rm-source]").forEach((b) => b.addEventListener("click", () => {
-    state.sources = state.sources.filter((s) => s !== b.dataset.rmSource); render(); settingsOpen = true; renderSettings();
+    state.sources = state.sources.filter((s) => s !== b.dataset.rmSource); commitSettings();
   }));
   document.querySelectorAll("[data-rm-course]").forEach((b) => b.addEventListener("click", () => {
-    state.courses = state.courses.filter((c) => c !== b.dataset.rmCourse); render(); settingsOpen = true; renderSettings();
+    state.courses = state.courses.filter((c) => c !== b.dataset.rmCourse); commitSettings();
   }));
+}
+
+function commitSettings() {
+  save();
+  if (cloudEnabled && currentUser) pushSharedSettings();
+  settingsOpen = true;
+  renderToolbar(); renderRecords(); renderSettings();
 }
 
 /* ---------- CSV export ---------- */
 function exportCSV() {
-  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes"];
-  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes]);
+  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
+  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
   const csv = [headers, ...rows].map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
