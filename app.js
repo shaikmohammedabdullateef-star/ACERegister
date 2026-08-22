@@ -70,12 +70,18 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-/* Only the tutor who created a record — or anyone when the app is running
-   in local/offline mode — can edit or delete it. */
+/* Only the tutor who created a record can edit or delete it. When the app
+   is connected to the shared team database, nobody can touch anything
+   until they're signed in with an approved account — no more silent
+   local-only editing for people who never signed in. */
 function canEdit(r) {
-  if (!cloudEnabled || !currentUser) return true;
-  if (!r.createdBy) return true; // legacy/local entries with no recorded owner
+  if (!cloudEnabled) return true; // no Firebase configured at all: plain offline app
+  if (!currentUser) return false; // must be signed in with an approved account
+  if (!r.createdBy) return true; // legacy entries with no recorded owner
   return r.createdBy === currentUser.uid;
+}
+function canAdd() {
+  return !cloudEnabled || !!currentUser;
 }
 
 function initCloud() {
@@ -182,8 +188,10 @@ function writeRecord(record, isNew) {
     return;
   }
   if (isNew) {
-    record.createdBy = currentUser.uid;
-    record.createdByName = currentUser.displayName || currentUser.email;
+    record.createdBy = currentUser.uid; // ownership always ties to the real signed-in account
+    if (!record.createdByName || !record.createdByName.trim()) {
+      record.createdByName = currentUser.displayName || currentUser.email; // fallback only
+    }
   }
   firebase.firestore().collection("ace_records").doc(record.id).set(record)
     .catch((err) => {
@@ -392,7 +400,7 @@ function renderRecords() {
   const wrap = document.getElementById("recordsWrap");
   if (list.length === 0) {
     wrap.innerHTML = `<div class="empty"><div style="font-size:26px;opacity:.5">&#128214;</div>
-      <p>${state.records.length === 0 ? "The register is empty. Add your first lead to begin." : "No entries match these filters."}</p></div>`;
+      <p>${!canAdd() ? "Sign in with an approved Google account to view and manage the shared register." : state.records.length === 0 ? "The register is empty. Add your first lead to begin." : "No entries match these filters."}</p></div>`;
     return;
   }
   wrap.innerHTML = `<div class="records">${list.map(recordCardHTML).join("")}</div>`;
@@ -459,7 +467,14 @@ function recordCardHTML(r) {
 }
 
 /* ---------- add/edit modal ---------- */
-function openAdd() { state.editing = emptyRecord(); renderModal(); }
+function openAdd() {
+  if (!canAdd()) {
+    showError("Please sign in with an approved Google account before adding entries.");
+    return;
+  }
+  state.editing = emptyRecord();
+  renderModal();
+}
 function openEdit(id) {
   const r = state.records.find((x) => x.id === id);
   if (!r || !canEdit(r)) return;
@@ -483,6 +498,7 @@ function renderModal() {
       <div class="modal-head"><h2>${isNew ? "New Register Entry" : `Edit — ${esc(r.name || "Entry")}`}</h2>
         <button class="icon-btn" id="modalClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
       <div class="form-grid">
+        ${isNew && cloudEnabled ? `<label class="field span2">Your name (shown as who added this)<input id="f_addedby" value="${esc(currentUser && currentUser.displayName ? currentUser.displayName : "")}" placeholder="e.g. Shahrukh" /></label>` : ""}
         <label class="field">Full name *<input id="f_name" value="${esc(r.name)}" placeholder="e.g. Priya Sharma" /></label>
         <label class="field">Contact number *<input id="f_contact" value="${esc(r.contact)}" placeholder="10-digit mobile" /></label>
         <label class="field">Email (Gmail etc.)<input id="f_email" type="email" value="${esc(r.email || "")}" placeholder="name@gmail.com" /></label>
@@ -511,6 +527,7 @@ function renderModal() {
     const name = document.getElementById("f_name").value.trim();
     const contact = document.getElementById("f_contact").value.trim();
     if (!name || !contact) return;
+    const addedByInput = document.getElementById("f_addedby");
     const updated = {
       ...r, name, contact,
       email: document.getElementById("f_email").value.trim(),
@@ -525,6 +542,7 @@ function renderModal() {
       feedback: document.getElementById("f_feedback").value,
       notes: document.getElementById("f_notes").value,
     };
+    if (addedByInput) updated.createdByName = addedByInput.value.trim();
     writeRecord(updated, isNew);
     state.editing = null;
     renderModal();
@@ -602,7 +620,10 @@ document.addEventListener("DOMContentLoaded", () => {
   load();
   document.getElementById("addBtn").addEventListener("click", openAdd);
   document.getElementById("exportBtn").addEventListener("click", exportCSV);
-  document.getElementById("customizeBtn").addEventListener("click", () => { settingsOpen = true; renderSettings(); });
+  document.getElementById("customizeBtn").addEventListener("click", () => {
+    if (!canAdd()) { showError("Please sign in with an approved Google account to customize the register."); return; }
+    settingsOpen = true; renderSettings();
+  });
   render();
   initCloud();
 
