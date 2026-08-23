@@ -34,7 +34,7 @@ function emptyRecord() {
   return {
     id: uid(), name: "", contact: "", email: "", leadSource: state.sources[0] || "", courseInterest: state.courses[0] || "",
     feeOffered: "", feedback: "", followedUp: "Pending", status: "New Lead",
-    classMode: "Offline", classTiming: "",
+    classMode: "Offline", classTiming: "", classType: "Group",
     joiningDate: "", renewalDate: "", notes: "", createdAt: new Date().toISOString().slice(0, 10),
     createdBy: null, createdByName: null,
   };
@@ -428,6 +428,7 @@ function renderRecords() {
     document.getElementById(`del-${r.id}`)?.addEventListener("click", () => { state.confirmDeleteId = r.id; renderRecords(); });
     document.getElementById(`delyes-${r.id}`)?.addEventListener("click", () => {
       deleteRecordRemote(r.id);
+      playDelete();
       state.confirmDeleteId = null;
     });
     document.getElementById(`delno-${r.id}`)?.addEventListener("click", () => { state.confirmDeleteId = null; renderRecords(); });
@@ -471,6 +472,7 @@ function recordCardHTML(r, i) {
           <span class="meta-item">&#127991;&#65039; ${esc(r.leadSource)}</span>
           <span class="meta-item course-tag" style="--course-color:${cc}">&#128214; ${esc(r.courseInterest)}</span>
           ${r.classMode ? `<span class="meta-item">${r.classMode === "Online" ? "&#128421;&#65039;" : "&#127963;&#65039;"} ${esc(r.classMode)}</span>` : ""}
+          ${r.classType ? `<span class="meta-item">${r.classType === "Group" ? "&#128101;" : "&#128100;"} ${esc(r.classType)}</span>` : ""}
           ${r.classTiming ? `<span class="meta-item">&#128337; ${esc(r.classTiming)}</span>` : ""}
           ${r.feeOffered ? `<span class="meta-item">&#8377; ${esc(r.feeOffered)}</span>` : ""}
           ${ownerNote}
@@ -529,6 +531,10 @@ function renderModal() {
           <option value="Offline" ${r.classMode === "Offline" ? "selected" : ""}>Offline (in-person)</option>
           <option value="Online" ${r.classMode === "Online" ? "selected" : ""}>Online</option>
         </select></label>
+        <label class="field">Class type<select id="f_classtype">
+          <option value="Group" ${r.classType === "Group" ? "selected" : ""}>Group</option>
+          <option value="One-on-One" ${r.classType === "One-on-One" ? "selected" : ""}>One-on-One</option>
+        </select></label>
         <label class="field">Class timing<input id="f_timing" value="${esc(r.classTiming || "")}" placeholder="e.g. 10:00 AM – 11:00 AM" /></label>
         <label class="field">Fee offered (₹)<input id="f_fee" type="number" value="${esc(r.feeOffered)}" placeholder="e.g. 4500" /></label>
         <label class="field">Status<select id="f_status">${statusOpts}</select></label>
@@ -560,6 +566,7 @@ function renderModal() {
       leadSource: document.getElementById("f_source").value,
       courseInterest: document.getElementById("f_course").value,
       classMode: document.getElementById("f_classmode").value,
+      classType: document.getElementById("f_classtype").value,
       classTiming: document.getElementById("f_timing").value.trim(),
       feeOffered: document.getElementById("f_fee").value,
       status: document.getElementById("f_status").value,
@@ -572,6 +579,7 @@ function renderModal() {
     };
     if (addedByInput) updated.createdByName = addedByInput.value.trim();
     writeRecord(updated, isNew);
+    playSuccess();
     state.editing = null;
     renderModal();
   });
@@ -633,8 +641,8 @@ function commitSettings() {
 
 /* ---------- CSV export ---------- */
 function exportCSV() {
-  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Timing", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
-  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.classMode, r.classTiming, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
+  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Type", "Class Timing", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
+  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.classMode, r.classType, r.classTiming, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
   const csv = [headers, ...rows].map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
@@ -643,9 +651,80 @@ function exportCSV() {
   URL.revokeObjectURL(url);
 }
 
+/* ---------- premium sound design ---------- */
+/* All sounds are synthesized in-browser (tiny sine/square blips with a
+   soft envelope) so there's nothing to download and it works offline. */
+let audioCtx = null;
+let soundOn = true;
+
+function loadSoundPref() {
+  try {
+    const v = localStorage.getItem("ace_sound");
+    if (v !== null) soundOn = v === "1";
+  } catch (e) {}
+}
+function getAudioCtx() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; }
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+function tone(freq, dur, type, vol, delay) {
+  if (!soundOn) return;
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime + (delay || 0);
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type || "sine";
+  osc.frequency.setValueAtTime(freq, t0);
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.006);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.03);
+}
+function playClick() { tone(760, 0.055, "sine", 0.045); }
+function playType() { tone(1350 + Math.random() * 220, 0.018, "square", 0.018); }
+function playSuccess() { tone(660, 0.09, "sine", 0.05); tone(990, 0.12, "sine", 0.05, 0.09); }
+function playDelete() { tone(320, 0.12, "sawtooth", 0.035); }
+
+function renderSoundBtn() {
+  const btn = document.getElementById("soundBtn");
+  if (!btn) return;
+  btn.innerHTML = soundOn ? "&#128266; Sound" : "&#128263; Muted";
+  btn.style.opacity = soundOn ? "1" : ".65";
+}
+function toggleSound() {
+  soundOn = !soundOn;
+  try { localStorage.setItem("ace_sound", soundOn ? "1" : "0"); } catch (e) {}
+  renderSoundBtn();
+  if (soundOn) playClick();
+}
+
+function initSoundUI() {
+  loadSoundPref();
+  renderSoundBtn();
+  document.getElementById("soundBtn").addEventListener("click", toggleSound);
+  // Soft click on every button-like control, anywhere in the app (delegated,
+  // so it also covers buttons rendered later inside modals/cards).
+  document.addEventListener("click", (e) => {
+    const t = e.target.closest(".btn, .icon-btn, .tab");
+    if (t) playClick();
+  });
+  // Gentle key-tap while typing in any field.
+  document.addEventListener("keydown", (e) => {
+    const tag = e.target.tagName;
+    if ((tag === "INPUT" || tag === "TEXTAREA") && e.key.length === 1) playType();
+  });
+}
+
 /* ---------- init ---------- */
 document.addEventListener("DOMContentLoaded", () => {
   load();
+  initSoundUI();
   document.getElementById("addBtn").addEventListener("click", openAdd);
   document.getElementById("exportBtn").addEventListener("click", exportCSV);
   document.getElementById("customizeBtn").addEventListener("click", () => {
