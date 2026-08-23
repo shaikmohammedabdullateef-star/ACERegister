@@ -34,6 +34,7 @@ function emptyRecord() {
   return {
     id: uid(), name: "", contact: "", email: "", leadSource: state.sources[0] || "", courseInterest: state.courses[0] || "",
     feeOffered: "", feedback: "", followedUp: "Pending", status: "New Lead",
+    classMode: "Offline", classTiming: "",
     joiningDate: "", renewalDate: "", notes: "", createdAt: new Date().toISOString().slice(0, 10),
     createdBy: null, createdByName: null,
   };
@@ -362,11 +363,28 @@ function render() {
 function renderStats() {
   const s = computeStats();
   document.getElementById("statsRow").innerHTML = `
-    <div class="stat-card" style="--grad:linear-gradient(135deg,#5B5BFF,#4C4CFF)"><div class="stat-label">&#128101; Total Leads</div><div class="stat-value">${s.total}</div></div>
-    <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594)"><div class="stat-label">&#9989; Enrolled</div><div class="stat-value">${s.enrolled}</div></div>
-    <div class="stat-card" style="--grad:linear-gradient(135deg,#FF7A5C,#E64A6B)"><div class="stat-label">&#128276; Follow-up Pending</div><div class="stat-value">${s.pending}</div></div>
-    <div class="stat-card" style="--grad:linear-gradient(135deg,#FFC157,#F5A623)"><div class="stat-label">&#9203; Renewals Due (30d)</div><div class="stat-value">${s.renewals}</div></div>
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#5B5BFF,#4C4CFF)"><div class="stat-label">&#128101; Total Leads</div><div class="stat-value" data-count="${s.total}">0</div></div>
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594)"><div class="stat-label">&#9989; Enrolled</div><div class="stat-value" data-count="${s.enrolled}">0</div></div>
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#FF7A5C,#E64A6B)"><div class="stat-label">&#128276; Follow-up Pending</div><div class="stat-value" data-count="${s.pending}">0</div></div>
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#FFC157,#F5A623)"><div class="stat-label">&#9203; Renewals Due (30d)</div><div class="stat-value" data-count="${s.renewals}">0</div></div>
   `;
+  animateCounts();
+}
+
+function animateCounts() {
+  document.querySelectorAll(".stat-value[data-count]").forEach((el) => {
+    const target = parseInt(el.dataset.count, 10) || 0;
+    if (target === 0) { el.textContent = "0"; return; }
+    const duration = 600;
+    const start = performance.now();
+    function tick(now) {
+      const p = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.round(eased * target);
+      if (p < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  });
 }
 
 function renderToolbar() {
@@ -403,7 +421,7 @@ function renderRecords() {
       <p>${!canAdd() ? "Sign in with an approved Google account to view and manage the shared register." : state.records.length === 0 ? "The register is empty. Add your first lead to begin." : "No entries match these filters."}</p></div>`;
     return;
   }
-  wrap.innerHTML = `<div class="records">${list.map(recordCardHTML).join("")}</div>`;
+  wrap.innerHTML = `<div class="records">${list.map((r, i) => recordCardHTML(r, i)).join("")}</div>`;
 
   list.forEach((r) => {
     document.getElementById(`edit-${r.id}`)?.addEventListener("click", () => openEdit(r.id));
@@ -417,7 +435,7 @@ function renderRecords() {
   observeReveal();
 }
 
-function recordCardHTML(r) {
+function recordCardHTML(r, i) {
   const sc = STATUS_COLOR[r.status] || "#4C4CFF";
   const fc = FOLLOW_COLOR[r.followedUp] || "#F5A623";
   const cc = courseColor(r.courseInterest);
@@ -425,6 +443,7 @@ function recordCardHTML(r) {
   const renewSoon = renewIn !== null && renewIn <= 30 && r.status === "Enrolled";
   const renewColor = renewIn < 0 ? "#E64A6B" : "#F5A623";
   const editable = canEdit(r);
+  const delay = Math.min(i || 0, 8) * 0.06;
 
   let actions;
   if (state.confirmDeleteId === r.id) {
@@ -439,7 +458,7 @@ function recordCardHTML(r) {
 
   const ownerNote = (cloudEnabled && r.createdByName) ? `<span class="meta-item" style="opacity:.75">&#128100; Added by ${esc(r.createdByName)}</span>` : "";
 
-  return `<div class="record" style="--course-color:${cc}">
+  return `<div class="record" style="--course-color:${cc};transition-delay:${delay}s">
     <div class="record-top">
       <div style="flex:1 1 240px">
         <div class="record-name-row">
@@ -451,6 +470,8 @@ function recordCardHTML(r) {
           ${r.email ? `<span class="meta-item">&#9993;&#65039; ${esc(r.email)}</span>` : ""}
           <span class="meta-item">&#127991;&#65039; ${esc(r.leadSource)}</span>
           <span class="meta-item course-tag" style="--course-color:${cc}">&#128214; ${esc(r.courseInterest)}</span>
+          ${r.classMode ? `<span class="meta-item">${r.classMode === "Online" ? "&#128421;&#65039;" : "&#127963;&#65039;"} ${esc(r.classMode)}</span>` : ""}
+          ${r.classTiming ? `<span class="meta-item">&#128337; ${esc(r.classTiming)}</span>` : ""}
           ${r.feeOffered ? `<span class="meta-item">&#8377; ${esc(r.feeOffered)}</span>` : ""}
           ${ownerNote}
         </div>
@@ -504,6 +525,11 @@ function renderModal() {
         <label class="field">Email (Gmail etc.)<input id="f_email" type="email" value="${esc(r.email || "")}" placeholder="name@gmail.com" /></label>
         <label class="field">Lead source<select id="f_source">${sourceOpts}</select></label>
         <label class="field">Course interest<select id="f_course">${courseOpts}</select></label>
+        <label class="field">Class mode<select id="f_classmode">
+          <option value="Offline" ${r.classMode === "Offline" ? "selected" : ""}>Offline (in-person)</option>
+          <option value="Online" ${r.classMode === "Online" ? "selected" : ""}>Online</option>
+        </select></label>
+        <label class="field">Class timing<input id="f_timing" value="${esc(r.classTiming || "")}" placeholder="e.g. 10:00 AM – 11:00 AM" /></label>
         <label class="field">Fee offered (₹)<input id="f_fee" type="number" value="${esc(r.feeOffered)}" placeholder="e.g. 4500" /></label>
         <label class="field">Status<select id="f_status">${statusOpts}</select></label>
         <label class="field">Followed up?<select id="f_follow">${followOpts}</select></label>
@@ -533,6 +559,8 @@ function renderModal() {
       email: document.getElementById("f_email").value.trim(),
       leadSource: document.getElementById("f_source").value,
       courseInterest: document.getElementById("f_course").value,
+      classMode: document.getElementById("f_classmode").value,
+      classTiming: document.getElementById("f_timing").value.trim(),
       feeOffered: document.getElementById("f_fee").value,
       status: document.getElementById("f_status").value,
       followedUp: document.getElementById("f_follow").value,
@@ -605,8 +633,8 @@ function commitSettings() {
 
 /* ---------- CSV export ---------- */
 function exportCSV() {
-  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
-  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
+  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Timing", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
+  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.classMode, r.classTiming, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
   const csv = [headers, ...rows].map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
