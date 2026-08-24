@@ -4,6 +4,7 @@ const DEFAULT_SOURCES = ["Instagram", "Facebook", "WhatsApp", "Referral", "Walk-
 const DEFAULT_COURSES = ["IELTS", "PTE", "Spoken English"];
 const STATUSES = ["New Lead", "Enrolled", "Not Interested", "Dropped"];
 const FOLLOWUPS = ["Yes", "Pending", "No"];
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 const STATUS_COLOR = { "New Lead": "#4C4CFF", "Enrolled": "#12A594", "Not Interested": "#8378B0", "Dropped": "#E64A6B" };
 const FOLLOW_COLOR = { Yes: "#12A594", Pending: "#F5A623", No: "#E64A6B" };
@@ -23,6 +24,7 @@ let state = {
   courseFilter: "All",
   statusFilter: "All",
   sourceFilter: "All",
+  tutorFilter: "All",
   editing: null,
   confirmDeleteId: null,
 };
@@ -66,6 +68,10 @@ let cloudEnabled = false;
 let currentUser = null;
 let unsubRecords = null;
 let unsubSettings = null;
+let unsubSchedule = null;
+let scheduleSlots = [];
+let unsubAttendance = null;
+let attendanceToday = [];
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -99,10 +105,16 @@ function initCloud() {
       renderAuthUI();
       if (unsubRecords) { unsubRecords(); unsubRecords = null; }
       if (unsubSettings) { unsubSettings(); unsubSettings = null; }
+      if (unsubSchedule) { unsubSchedule(); unsubSchedule = null; }
+      if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
       if (user) {
         subscribeSharedRecords();
         subscribeSharedSettings();
+        subscribeSchedule();
+        subscribeAttendance();
       } else {
+        scheduleSlots = [];
+        attendanceToday = [];
         load();
         render();
       }
@@ -176,6 +188,123 @@ function pushSharedSettings() {
     updatedAt: new Date().toISOString(),
     updatedBy: currentUser ? (currentUser.displayName || currentUser.email) : "device",
   }).catch(() => showError("Couldn't sync this change to the team — try again."));
+}
+
+/* ---------- shared tutor schedule board ---------- */
+/* Every tutor manages their own slots (day, time, filled/empty, student
+   name). Everyone on the team can view the whole board to see who's free
+   when — but only the tutor who owns a slot can edit or delete it. */
+function subscribeSchedule() {
+  unsubSchedule = firebase.firestore().collection("ace_schedule")
+    .onSnapshot((snap) => {
+      scheduleSlots = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      if (scheduleOpen) renderSchedule();
+    }, (err) => {
+      if (handleShareError(err)) return;
+    });
+}
+function canEditSlot(s) {
+  if (!cloudEnabled) return true;
+  if (!currentUser) return false;
+  if (!s.tutorUid) return true;
+  return s.tutorUid === currentUser.uid;
+}
+function writeSlot(slot, isNew) {
+  if (!cloudEnabled || !currentUser) {
+    const exists = scheduleSlots.some((x) => x.id === slot.id);
+    scheduleSlots = exists ? scheduleSlots.map((x) => (x.id === slot.id ? slot : x)) : [slot, ...scheduleSlots];
+    renderSchedule();
+    return;
+  }
+  if (isNew) {
+    slot.tutorUid = currentUser.uid;
+    if (!slot.tutorName || !slot.tutorName.trim()) slot.tutorName = currentUser.displayName || currentUser.email;
+  }
+  firebase.firestore().collection("ace_schedule").doc(slot.id).set(slot)
+    .catch((err) => {
+      if (handleShareError(err)) return;
+      showError(isNew ? "Couldn't save this slot — try again." : "You can only edit your own slots.");
+    });
+}
+function deleteSlot(id) {
+  if (!cloudEnabled || !currentUser) {
+    scheduleSlots = scheduleSlots.filter((x) => x.id !== id);
+    renderSchedule();
+    return;
+  }
+  firebase.firestore().collection("ace_schedule").doc(id).delete()
+    .catch((err) => {
+      if (handleShareError(err)) return;
+      showError("You can only delete your own slots.");
+    });
+}
+
+/* ---------- shared tutor attendance (punch in/out + leave) ---------- */
+function subscribeAttendance() {
+  unsubAttendance = firebase.firestore().collection("ace_attendance")
+    .where("date", "==", todayStr())
+    .onSnapshot((snap) => {
+      attendanceToday = snap.docs.map((d) => d.data()).sort((a, b) => (a.punchInTime || "").localeCompare(b.punchInTime || ""));
+      if (attendanceOpen && !reportView) renderAttendance();
+    }, (err) => { if (handleShareError(err)) return; });
+}
+function punchIn() {
+  if (!currentUser) return;
+  const id = `${todayStr()}_${currentUser.uid}`;
+  firebase.firestore().collection("ace_attendance").doc(id).set({
+    uid: currentUser.uid, name: currentUser.displayName || currentUser.email,
+    date: todayStr(), punchInTime: new Date().toISOString(), punchOutTime: null, status: "present",
+  }, { merge: true }).then(playSuccess);
+}
+function punchOut() {
+  if (!currentUser) return;
+  const id = `${todayStr()}_${currentUser.uid}`;
+  firebase.firestore().collection("ace_attendance").doc(id).set({
+    punchOutTime: new Date().toISOString(),
+  }, { merge: true }).then(playSuccess);
+}
+function markLeave() {
+  if (!currentUser) return;
+  const id = `${todayStr()}_${currentUser.uid}`;
+  firebase.firestore().collection("ace_attendance").doc(id).set({
+    uid: currentUser.uid, name: currentUser.displayName || currentUser.email,
+    date: todayStr(), punchInTime: null, punchOutTime: null, status: "leave",
+  }, { merge: true }).then(playSuccess);
+}
+function fmtTime(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
+
+let reportView = false;
+let reportLoading = false;
+let reportData = []; // [{uid, name, present, leave}]
+function monthBounds() {
+  const now = new Date();
+  const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+  return { start, end: todayStr() };
+}
+function loadMonthlyAttendanceReport() {
+  if (!cloudEnabled) return;
+  reportLoading = true;
+  renderAttendance();
+  const { start, end } = monthBounds();
+  firebase.firestore().collection("ace_attendance")
+    .where("date", ">=", start).where("date", "<=", end)
+    .get()
+    .then((snap) => {
+      const byUser = {};
+      snap.docs.forEach((d) => {
+        const a = d.data();
+        if (!byUser[a.uid]) byUser[a.uid] = { uid: a.uid, name: a.name, present: 0, leave: 0 };
+        if (a.status === "leave") byUser[a.uid].leave += 1;
+        else if (a.punchInTime) byUser[a.uid].present += 1;
+      });
+      reportData = Object.values(byUser).sort((a, b) => b.present - a.present);
+      reportLoading = false;
+      renderAttendance();
+    })
+    .catch(() => { reportLoading = false; renderAttendance(); });
 }
 
 /* Writes a single record document. Ownership fields are only ever set on
@@ -256,12 +385,17 @@ function filteredRecords() {
     if (state.courseFilter !== "All" && r.courseInterest !== state.courseFilter) return false;
     if (state.statusFilter !== "All" && r.status !== state.statusFilter) return false;
     if (state.sourceFilter !== "All" && r.leadSource !== state.sourceFilter) return false;
+    if (state.tutorFilter !== "All" && (r.createdByName || "Unassigned") !== state.tutorFilter) return false;
     if (state.search.trim()) {
       const q = state.search.toLowerCase();
       if (!r.name.toLowerCase().includes(q) && !r.contact.toLowerCase().includes(q)) return false;
     }
     return true;
   });
+}
+function distinctTutors() {
+  const names = new Set(state.records.map((r) => r.createdByName || "Unassigned"));
+  return Array.from(names).sort();
 }
 function computeStats() {
   return {
@@ -390,6 +524,8 @@ function animateCounts() {
 function renderToolbar() {
   const statusOpts = ["All", ...STATUSES].map((o) => `<option value="${esc(o)}" ${state.statusFilter === o ? "selected" : ""}>${o === "All" ? "Status: All" : esc(o)}</option>`).join("");
   const sourceOpts = ["All", ...state.sources].map((o) => `<option value="${esc(o)}" ${state.sourceFilter === o ? "selected" : ""}>${o === "All" ? "Source: All" : esc(o)}</option>`).join("");
+  const tutors = distinctTutors();
+  const tutorOpts = ["All", ...tutors].map((o) => `<option value="${esc(o)}" ${state.tutorFilter === o ? "selected" : ""}>${o === "All" ? "Tutor: All" : esc(o)}</option>`).join("");
   const tabs = ["All", ...state.courses].map((c) => {
     const active = state.courseFilter === c;
     const bg = c === "All" ? "var(--ink)" : courseColor(c);
@@ -402,12 +538,14 @@ function renderToolbar() {
       </div>
       <select class="filter-select" id="statusFilter">${statusOpts}</select>
       <select class="filter-select" id="sourceFilter">${sourceOpts}</select>
+      ${tutors.length > 1 ? `<select class="filter-select" id="tutorFilter">${tutorOpts}</select>` : ""}
     </div>
     <div class="tabs">${tabs}</div>
   `;
   document.getElementById("searchInput").addEventListener("input", (e) => { state.search = e.target.value; renderRecords(); });
   document.getElementById("statusFilter").addEventListener("change", (e) => { state.statusFilter = e.target.value; renderRecords(); });
   document.getElementById("sourceFilter").addEventListener("change", (e) => { state.sourceFilter = e.target.value; renderRecords(); });
+  document.getElementById("tutorFilter")?.addEventListener("change", (e) => { state.tutorFilter = e.target.value; renderRecords(); });
   document.querySelectorAll("[data-course-tab]").forEach((btn) => {
     btn.addEventListener("click", () => { state.courseFilter = btn.dataset.courseTab; renderToolbar(); renderRecords(); });
   });
@@ -639,6 +777,252 @@ function commitSettings() {
   renderToolbar(); renderRecords(); renderSettings();
 }
 
+/* ---------- schedule board ---------- */
+let scheduleOpen = false;
+let scheduleTutorFilter = "All";
+let scheduleEditing = null; // slot being added/edited, or null
+let scheduleConfirmDeleteId = null;
+
+function emptySlot() {
+  return { id: uid(), day: WEEKDAYS[0], time: "", status: "Empty", studentName: "", tutorUid: null, tutorName: "" };
+}
+function scheduleTutors() {
+  const names = new Set(scheduleSlots.map((s) => s.tutorName || "Unassigned"));
+  return Array.from(names).sort();
+}
+function openScheduleBtn() {
+  if (!canAdd()) { showError("Please sign in with an approved Google account to view the schedule."); return; }
+  scheduleOpen = true;
+  renderSchedule();
+}
+function closeSchedule() { scheduleOpen = false; scheduleEditing = null; renderSchedule(); }
+
+function renderSchedule() {
+  const host = document.getElementById("scheduleHost");
+  if (!scheduleOpen) { host.innerHTML = ""; return; }
+
+  if (scheduleEditing) { renderSlotForm(); return; }
+
+  const tutors = scheduleTutors();
+  const filtered = scheduleTutorFilter === "All" ? scheduleSlots : scheduleSlots.filter((s) => (s.tutorName || "Unassigned") === scheduleTutorFilter);
+  const tutorOpts = ["All", ...tutors].map((t) => `<option value="${esc(t)}" ${scheduleTutorFilter === t ? "selected" : ""}>${t === "All" ? "Tutor: All" : esc(t)}</option>`).join("");
+
+  const byDay = {};
+  WEEKDAYS.forEach((d) => (byDay[d] = []));
+  filtered.forEach((s) => { (byDay[s.day] = byDay[s.day] || []).push(s); });
+
+  const dayBlocks = WEEKDAYS.map((day) => {
+    const slots = (byDay[day] || []).slice().sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+    if (slots.length === 0) return "";
+    const rows = slots.map((s) => {
+      const filled = s.status === "Filled";
+      const color = filled ? "#E64A6B" : "#12A594";
+      const editable = canEditSlot(s);
+      let actions;
+      if (scheduleConfirmDeleteId === s.id) {
+        actions = `<button class="icon-btn" id="slotdelyes-${s.id}" style="color:#E64A6B;border-color:#E64A6B33">&#10003;</button>
+          <button class="icon-btn" id="slotdelno-${s.id}" style="color:#8378B0;border-color:#8378B033">&#10005;</button>`;
+      } else if (editable) {
+        actions = `<button class="icon-btn" id="slotedit-${s.id}" style="color:#4C4CFF;border-color:#4C4CFF33">&#9998;</button>
+          <button class="icon-btn" id="slotdel-${s.id}" style="color:#E64A6B;border-color:#E64A6B33">&#128465;</button>`;
+      } else {
+        actions = `<span class="icon-btn" style="color:#8378B0;border-color:#8378B033;cursor:default" title="Only ${esc(s.tutorName || "the tutor")} can edit this slot">&#128274;</span>`;
+      }
+      return `<div class="record" style="--course-color:${color};padding:10px 13px">
+        <div class="record-top">
+          <div style="flex:1 1 200px">
+            <div class="record-name-row">
+              <span class="record-name" style="font-size:14px">${esc(s.time || "No time set")}</span>
+              <span class="stamp" style="color:${color};border-color:${color}">${filled ? "Filled" : "Empty"}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-item">&#128100; ${esc(s.tutorName || "Unassigned")}</span>
+              ${filled && s.studentName ? `<span class="meta-item">&#127891; ${esc(s.studentName)}</span>` : ""}
+            </div>
+          </div>
+          <div class="row-actions">${actions}</div>
+        </div>
+      </div>`;
+    }).join("");
+    return `<div style="margin-bottom:14px">
+      <div style="font-family:var(--font-display);font-weight:700;font-size:13.5px;color:#5c5386;margin-bottom:6px">${day}</div>
+      <div style="display:flex;flex-direction:column;gap:6px">${rows}</div>
+    </div>`;
+  }).join("");
+
+  const hasAny = filtered.length > 0;
+
+  const host2 = document.getElementById("scheduleHost");
+  host2.innerHTML = `<div class="overlay" id="scheduleOverlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head"><h2>Tutor Schedule</h2><button class="icon-btn" id="scheduleClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+        ${tutors.length > 1 ? `<select class="filter-select" id="scheduleTutorFilter">${tutorOpts}</select>` : ""}
+        <button class="btn btn-brass" id="addSlotBtn" style="margin-left:auto">&#65291; Add Slot</button>
+      </div>
+      ${hasAny ? dayBlocks : `<div class="empty" style="padding:30px"><p>No slots yet ${scheduleTutorFilter !== "All" ? `for ${esc(scheduleTutorFilter)}` : ""}. Add one to get started.</p></div>`}
+      <div class="modal-actions"><button class="btn btn-light" id="scheduleDone">Close</button></div>
+    </div>
+  </div>`;
+
+  document.getElementById("scheduleOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "scheduleOverlay") closeSchedule(); });
+  document.getElementById("scheduleClose").addEventListener("click", closeSchedule);
+  document.getElementById("scheduleDone").addEventListener("click", closeSchedule);
+  document.getElementById("scheduleTutorFilter")?.addEventListener("change", (e) => { scheduleTutorFilter = e.target.value; renderSchedule(); });
+  document.getElementById("addSlotBtn").addEventListener("click", () => {
+    if (!canAdd()) { showError("Please sign in with an approved Google account to add a slot."); return; }
+    scheduleEditing = emptySlot();
+    renderSchedule();
+  });
+  filtered.forEach((s) => {
+    document.getElementById(`slotedit-${s.id}`)?.addEventListener("click", () => {
+      if (!canEditSlot(s)) return;
+      scheduleEditing = { ...s };
+      renderSchedule();
+    });
+    document.getElementById(`slotdel-${s.id}`)?.addEventListener("click", () => { scheduleConfirmDeleteId = s.id; renderSchedule(); });
+    document.getElementById(`slotdelyes-${s.id}`)?.addEventListener("click", () => {
+      deleteSlot(s.id); playDelete(); scheduleConfirmDeleteId = null;
+    });
+    document.getElementById(`slotdelno-${s.id}`)?.addEventListener("click", () => { scheduleConfirmDeleteId = null; renderSchedule(); });
+  });
+}
+
+function renderSlotForm() {
+  const s = scheduleEditing;
+  const isNew = !scheduleSlots.some((x) => x.id === s.id);
+  const dayOpts = WEEKDAYS.map((d) => `<option value="${esc(d)}" ${s.day === d ? "selected" : ""}>${d}</option>`).join("");
+  const host = document.getElementById("scheduleHost");
+  host.innerHTML = `<div class="overlay" id="slotFormOverlay">
+    <div class="modal" style="max-width:440px">
+      <div class="modal-head"><h2>${isNew ? "Add Slot" : "Edit Slot"}</h2><button class="icon-btn" id="slotFormClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
+      <div class="form-grid">
+        ${isNew && cloudEnabled ? `<label class="field span2">Tutor name<input id="s_tutorname" value="${esc(currentUser && currentUser.displayName ? currentUser.displayName : "")}" placeholder="e.g. Shahrukh" /></label>` : ""}
+        <label class="field">Day<select id="s_day">${dayOpts}</select></label>
+        <label class="field">Time<input id="s_time" value="${esc(s.time || "")}" placeholder="e.g. 10:00–11:00 AM" /></label>
+        <label class="field">Status<select id="s_status">
+          <option value="Empty" ${s.status === "Empty" ? "selected" : ""}>Empty (free)</option>
+          <option value="Filled" ${s.status === "Filled" ? "selected" : ""}>Filled</option>
+        </select></label>
+        <label class="field">Student name<input id="s_student" value="${esc(s.studentName || "")}" placeholder="only if filled" /></label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-light" id="slotFormCancel">Cancel</button>
+        <button class="btn btn-brass" id="slotFormSave">&#10003; Save Slot</button>
+      </div>
+    </div>
+  </div>`;
+
+  const back = () => { scheduleEditing = null; renderSchedule(); };
+  document.getElementById("slotFormOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "slotFormOverlay") back(); });
+  document.getElementById("slotFormClose").addEventListener("click", back);
+  document.getElementById("slotFormCancel").addEventListener("click", back);
+  document.getElementById("slotFormSave").addEventListener("click", () => {
+    const tutorInput = document.getElementById("s_tutorname");
+    const updated = {
+      ...s,
+      day: document.getElementById("s_day").value,
+      time: document.getElementById("s_time").value.trim(),
+      status: document.getElementById("s_status").value,
+      studentName: document.getElementById("s_student").value.trim(),
+    };
+    if (tutorInput) updated.tutorName = tutorInput.value.trim();
+    writeSlot(updated, isNew);
+    playSuccess();
+    scheduleEditing = null;
+    renderSchedule();
+  });
+}
+
+/* ---------- attendance UI ---------- */
+let attendanceOpen = false;
+
+function openAttendanceBtn() {
+  if (!canAdd()) { showError("Please sign in with an approved Google account to view attendance."); return; }
+  attendanceOpen = true;
+  reportView = false;
+  renderAttendance();
+}
+function closeAttendance() { attendanceOpen = false; renderAttendance(); }
+
+function pieGradient(presentPct) {
+  return `conic-gradient(#12A594 0% ${presentPct}%, #E64A6B ${presentPct}% 100%)`;
+}
+
+function renderAttendance() {
+  const host = document.getElementById("attendanceHost");
+  if (!attendanceOpen) { host.innerHTML = ""; return; }
+  const mine = currentUser ? attendanceToday.find((a) => a.uid === currentUser.uid) : null;
+
+  const todayRows = attendanceToday.map((a) => `
+    <div class="record" style="padding:9px 12px">
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
+        <span style="font-weight:700">${esc(a.name)}</span>
+        ${a.status === "leave"
+          ? `<span class="stamp" style="color:#8B5CF6;border-color:#8B5CF6">On Leave</span>`
+          : `<span style="font-size:12px;color:#5c5386">In: <b>${fmtTime(a.punchInTime)}</b> &nbsp; Out: <b>${fmtTime(a.punchOutTime)}</b></span>`}
+      </div>
+    </div>`).join("") || `<div class="empty" style="padding:24px"><p>No punches yet today.</p></div>`;
+
+  const monthLabel = new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  const reportRows = reportLoading
+    ? `<div class="empty" style="padding:24px"><p>Loading report…</p></div>`
+    : (reportData.map((u) => {
+        const tracked = u.present + u.leave;
+        const pct = tracked ? Math.round((u.present / tracked) * 100) : 0;
+        return `<div class="record" style="padding:12px 14px">
+          <div style="display:flex;gap:14px;align-items:center">
+            <div style="width:64px;height:64px;border-radius:50%;background:${pieGradient(pct)};flex-shrink:0;box-shadow:0 3px 10px rgba(30,21,71,0.15)"></div>
+            <div style="flex:1">
+              <div style="font-weight:700;margin-bottom:3px">${esc(u.name)}</div>
+              <div style="font-size:12px;color:#5c5386">
+                <span style="color:#12A594;font-weight:700">&#9679;</span> ${u.present} present &nbsp;
+                <span style="color:#E64A6B;font-weight:700">&#9679;</span> ${u.leave} leave${u.leave === 1 ? "" : "s"} &nbsp;
+                <b>${pct}%</b> attendance
+              </div>
+            </div>
+          </div>
+        </div>`;
+      }).join("") || `<div class="empty" style="padding:24px"><p>No attendance recorded this month yet.</p></div>`);
+
+  host.innerHTML = `<div class="overlay" id="attendanceOverlay">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-head"><h2>Tutor Attendance</h2><button class="icon-btn" id="attendanceClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
+
+      <div class="tabs" style="margin-bottom:12px">
+        <button class="tab ${!reportView ? "active" : ""}" style="${!reportView ? "background:var(--ink)" : ""}" id="tabToday">Today</button>
+        <button class="tab ${reportView ? "active" : ""}" style="${reportView ? "background:var(--ink)" : ""}" id="tabReport">Monthly Report</button>
+      </div>
+
+      ${!reportView ? `
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn btn-brass" id="punchInBtn" style="flex:1;justify-content:center;padding:10px" ${mine && (mine.punchInTime || mine.status === "leave") ? "disabled" : ""}>&#9203; Punch In</button>
+          <button class="btn btn-light" id="punchOutBtn" style="flex:1;justify-content:center;padding:10px" ${!mine || !mine.punchInTime || mine.punchOutTime ? "disabled" : ""}>&#128683; Punch Out</button>
+        </div>
+        <button class="btn btn-light" id="leaveBtn" style="width:100%;justify-content:center;padding:8px;margin-bottom:14px" ${mine && (mine.punchInTime || mine.status === "leave") ? "disabled" : ""}>&#127796; Mark Today as Leave</button>
+        <div style="font-size:12px;font-weight:700;color:#5c5386;margin-bottom:6px">Today's log (shared, all tutors)</div>
+        <div style="display:flex;flex-direction:column;gap:6px">${todayRows}</div>
+      ` : `
+        <div style="font-size:12px;font-weight:700;color:#5c5386;margin-bottom:10px">${monthLabel} — present vs leave per tutor</div>
+        <div style="display:flex;flex-direction:column;gap:8px">${reportRows}</div>
+      `}
+
+      <div class="modal-actions"><button class="btn btn-brass" id="attendanceDone">Done</button></div>
+    </div>
+  </div>`;
+
+  document.getElementById("attendanceOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "attendanceOverlay") closeAttendance(); });
+  document.getElementById("attendanceClose").addEventListener("click", closeAttendance);
+  document.getElementById("attendanceDone").addEventListener("click", closeAttendance);
+  document.getElementById("tabToday").addEventListener("click", () => { reportView = false; renderAttendance(); });
+  document.getElementById("tabReport").addEventListener("click", () => { reportView = true; loadMonthlyAttendanceReport(); });
+  if (!reportView) {
+    document.getElementById("punchInBtn").addEventListener("click", punchIn);
+    document.getElementById("punchOutBtn").addEventListener("click", punchOut);
+    document.getElementById("leaveBtn").addEventListener("click", markLeave);
+  }
+}
+
 /* ---------- CSV export ---------- */
 function exportCSV() {
   const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Type", "Class Timing", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
@@ -721,12 +1105,32 @@ function initSoundUI() {
   });
 }
 
+/* ---------- theme system (Default / Light / Dark) ---------- */
+function applyTheme(name) {
+  document.documentElement.setAttribute("data-theme", name);
+  try { localStorage.setItem("ace_theme", name); } catch (e) {}
+  ["Default", "Light", "Dark"].forEach((n) => {
+    document.getElementById(`theme${n}`)?.classList.toggle("active", n.toLowerCase() === name);
+  });
+}
+function initThemeUI() {
+  let saved = "default";
+  try { saved = localStorage.getItem("ace_theme") || "default"; } catch (e) {}
+  applyTheme(saved);
+  document.getElementById("themeDefault").addEventListener("click", () => applyTheme("default"));
+  document.getElementById("themeLight").addEventListener("click", () => applyTheme("light"));
+  document.getElementById("themeDark").addEventListener("click", () => applyTheme("dark"));
+}
+
 /* ---------- init ---------- */
 document.addEventListener("DOMContentLoaded", () => {
   load();
   initSoundUI();
+  initThemeUI();
   document.getElementById("addBtn").addEventListener("click", openAdd);
   document.getElementById("exportBtn").addEventListener("click", exportCSV);
+  document.getElementById("scheduleBtn").addEventListener("click", openScheduleBtn);
+  document.getElementById("attendanceBtn").addEventListener("click", openAttendanceBtn);
   document.getElementById("customizeBtn").addEventListener("click", () => {
     if (!canAdd()) { showError("Please sign in with an approved Google account to customize the register."); return; }
     settingsOpen = true; renderSettings();

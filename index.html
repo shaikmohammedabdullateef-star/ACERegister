@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<script>
+  try {
+    var t = localStorage.getItem("ace_theme") || "default";
+    document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>ACE Register</title>
 <meta name="theme-color" content="#24352B" />
@@ -29,8 +35,15 @@
       <p class="tagline">Lead &amp; Student Register — IELTS · PTE · Spoken English</p>
     </div>
     <div class="header-actions">
+      <div class="theme-switch" id="themeSwitch">
+        <button class="theme-opt" id="themeDefault" title="Default (premium purple)">&#127912;</button>
+        <button class="theme-opt" id="themeLight" title="White">&#9728;&#65039;</button>
+        <button class="theme-opt" id="themeDark" title="Black">&#127769;</button>
+      </div>
       <span id="authArea"></span>
       <button class="btn btn-ghost-dark" id="soundBtn">&#128266; Sound</button>
+      <button class="btn btn-ghost-dark" id="scheduleBtn">&#128197; Schedule</button>
+      <button class="btn btn-ghost-dark" id="attendanceBtn">&#128337; Attendance</button>
       <button class="btn btn-ghost-dark" id="customizeBtn">&#9881;&#65039; Customize</button>
       <button class="btn btn-ghost-dark" id="exportBtn">&#11015;&#65039; Export</button>
       <button class="btn btn-brass" id="addBtn">&#65291; Add Entry</button>
@@ -48,6 +61,8 @@
 
 <div id="modalHost"></div>
 <div id="settingsHost"></div>
+<div id="scheduleHost"></div>
+<div id="attendanceHost"></div>
 
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
