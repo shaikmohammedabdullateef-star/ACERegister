@@ -54,9 +54,26 @@ function fmtDate(dateStr) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+function waLink(contact) {
+  const digits = String(contact || "").replace(/\D/g, "");
+  if (!digits) return null;
+  const withCountry = digits.length === 10 ? `91${digits}` : digits;
+  return `https://wa.me/${withCountry}`;
+}
 function showError(msg) {
   const el = document.getElementById("saveError");
   el.textContent = msg;
+  el.style.background = "linear-gradient(120deg,#FFE1E8,#FFD0DC)";
+  el.style.borderColor = "var(--brick)";
+  el.style.color = "#8A1235";
+  el.style.display = "block";
+}
+function showNotice(msg) {
+  const el = document.getElementById("saveError");
+  el.textContent = msg;
+  el.style.background = "linear-gradient(120deg,#D6F5EE,#C4EEE3)";
+  el.style.borderColor = "#12A594";
+  el.style.color = "#0B5A4C";
   el.style.display = "block";
 }
 function clearError() {
@@ -606,6 +623,7 @@ function recordCardHTML(r, i) {
         </div>
         <div class="meta-row">
           <span class="meta-item">&#128222; ${esc(r.contact)}</span>
+          ${waLink(r.contact) ? `<a class="meta-item" href="${waLink(r.contact)}" target="_blank" rel="noopener" style="color:#12A594;text-decoration:none;font-weight:600" title="Chat on WhatsApp">&#128172; WhatsApp</a>` : ""}
           ${r.email ? `<span class="meta-item">&#9993;&#65039; ${esc(r.email)}</span>` : ""}
           <span class="meta-item">&#127991;&#65039; ${esc(r.leadSource)}</span>
           <span class="meta-item course-tag" style="--course-color:${cc}">&#128214; ${esc(r.courseInterest)}</span>
@@ -716,6 +734,12 @@ function renderModal() {
       notes: document.getElementById("f_notes").value,
     };
     if (addedByInput) updated.createdByName = addedByInput.value.trim();
+    if (isNew) {
+      const dupe = state.records.find((x) => x.contact.trim() === contact && x.id !== updated.id);
+      if (dupe && !window.confirm(`A student with this number is already in the register (${dupe.name}, added by ${dupe.createdByName || "someone"}).\n\nAdd this as a new entry anyway?`)) {
+        return;
+      }
+    }
     writeRecord(updated, isNew);
     playSuccess();
     state.editing = null;
@@ -743,6 +767,13 @@ function renderSettings() {
       <div style="font-size:12.5px;font-weight:700;color:#5c5648;margin-bottom:6px">Courses</div>
       <div class="chips">${courseChips}</div>
       <div class="add-row"><input id="newCourseInput" value="${esc(newCourseVal)}" placeholder="e.g. Business English" /><button class="btn btn-light" id="addCourseBtn">+</button></div>
+      <div style="height:16px;border-top:1px solid var(--surface-line)"></div>
+      <div style="font-size:12.5px;font-weight:700;color:var(--text-muted);margin-bottom:6px">Backup &amp; Restore</div>
+      <p style="font-size:11.5px;color:var(--text-faint);margin:0 0 8px">Download every student, lead source, and course as one file — useful as a safety copy, or to move data if something ever goes wrong.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-light" id="backupExportBtn">&#11015;&#65039; Download Full Backup</button>
+        <label class="btn btn-light" style="cursor:pointer">&#11014;&#65039; Restore from Backup<input type="file" id="backupRestoreInput" accept="application/json" style="display:none" /></label>
+      </div>
       <div class="modal-actions"><button class="btn btn-brass" id="settingsDone">Done</button></div>
     </div>
   </div>`;
@@ -768,6 +799,56 @@ function renderSettings() {
   document.querySelectorAll("[data-rm-course]").forEach((b) => b.addEventListener("click", () => {
     state.courses = state.courses.filter((c) => c !== b.dataset.rmCourse); commitSettings();
   }));
+  document.getElementById("backupExportBtn").addEventListener("click", exportFullBackup);
+  document.getElementById("backupRestoreInput").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) restoreFromBackup(file);
+    e.target.value = "";
+  });
+}
+
+function exportFullBackup() {
+  const backup = {
+    exportedAt: new Date().toISOString(),
+    records: state.records,
+    sources: state.sources,
+    courses: state.courses,
+  };
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `ace_register_backup_${todayStr()}.json`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function restoreFromBackup(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let backup;
+    try { backup = JSON.parse(reader.result); } catch (e) {
+      showError("That file doesn't look like a valid ACE Register backup.");
+      return;
+    }
+    if (!Array.isArray(backup.records)) { showError("That file doesn't look like a valid ACE Register backup."); return; }
+    if (!window.confirm(`Restore ${backup.records.length} student record(s) from this backup? This adds them into the current register (existing entries are kept, not replaced).`)) return;
+
+    if (backup.sources?.length) { backup.sources.forEach((s) => { if (!state.sources.includes(s)) state.sources.push(s); }); }
+    if (backup.courses?.length) { backup.courses.forEach((c) => { if (!state.courses.includes(c)) state.courses.push(c); }); }
+    commitSettings();
+
+    if (!cloudEnabled || !currentUser) {
+      backup.records.forEach((r) => { if (!state.records.some((x) => x.id === r.id)) state.records.push(r); });
+      render();
+    } else {
+      const col = firebase.firestore().collection("ace_records");
+      backup.records.forEach((r) => {
+        col.doc(r.id).set(r).catch(() => {});
+      });
+    }
+    playSuccess();
+    showNotice(`Restored ${backup.records.length} record(s) from backup.`);
+  };
+  reader.readAsText(file);
 }
 
 function commitSettings() {
@@ -1023,6 +1104,106 @@ function renderAttendance() {
   }
 }
 
+/* ---------- business dashboard ---------- */
+let dashboardOpen = false;
+
+function openDashboardBtn() {
+  if (!canAdd()) { showError("Please sign in with an approved Google account to view the dashboard."); return; }
+  dashboardOpen = true;
+  renderDashboard();
+}
+function closeDashboard() { dashboardOpen = false; renderDashboard(); }
+
+function groupConversion(field) {
+  const groups = {};
+  state.records.forEach((r) => {
+    const key = r[field] || "Unspecified";
+    if (!groups[key]) groups[key] = { total: 0, enrolled: 0 };
+    groups[key].total += 1;
+    if (r.status === "Enrolled") groups[key].enrolled += 1;
+  });
+  return Object.entries(groups)
+    .map(([name, g]) => ({ name, total: g.total, enrolled: g.enrolled, pct: g.total ? Math.round((g.enrolled / g.total) * 100) : 0 }))
+    .sort((a, b) => b.total - a.total);
+}
+function monthlyEnrollments() {
+  const counts = {};
+  state.records.forEach((r) => {
+    if (r.status !== "Enrolled" || !r.joiningDate) return;
+    const key = r.joiningDate.slice(0, 7); // YYYY-MM
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0])).slice(-6);
+}
+function monthLabel(ym) {
+  const [y, m] = ym.split("-");
+  return new Date(parseInt(y, 10), parseInt(m, 10) - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+}
+
+function renderDashboard() {
+  const host = document.getElementById("dashboardHost");
+  if (!dashboardOpen) { host.innerHTML = ""; return; }
+
+  const totalRevenue = state.records
+    .filter((r) => r.status === "Enrolled")
+    .reduce((sum, r) => sum + (parseFloat(r.feeOffered) || 0), 0);
+
+  const bySource = groupConversion("leadSource");
+  const byCourse = groupConversion("courseInterest");
+  const months = monthlyEnrollments();
+  const maxMonth = Math.max(1, ...months.map((m) => m[1]));
+
+  const barRow = (label, total, enrolled, pct, color) => `
+    <div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px">
+        <span style="font-weight:600">${esc(label)}</span>
+        <span style="color:var(--text-muted)">${enrolled}/${total} enrolled · <b style="color:${color}">${pct}%</b></span>
+      </div>
+      <div style="background:var(--surface-line);border-radius:999px;height:8px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${color};border-radius:999px;transition:width .6s var(--ease)"></div>
+      </div>
+    </div>`;
+
+  const sourceRows = bySource.map((g) => barRow(g.name, g.total, g.enrolled, g.pct, courseColor(g.name))).join("") || `<p style="color:var(--text-faint);font-size:13px">No leads yet.</p>`;
+  const courseRows = byCourse.map((g) => barRow(g.name, g.total, g.enrolled, g.pct, courseColor(g.name))).join("") || `<p style="color:var(--text-faint);font-size:13px">No leads yet.</p>`;
+
+  const monthBars = months.length ? `
+    <div style="display:flex;align-items:flex-end;gap:10px;height:110px;padding-top:10px">
+      ${months.map(([ym, count]) => `
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px">
+          <div style="font-size:11px;font-weight:700;color:var(--inkwell)">${count}</div>
+          <div style="width:100%;max-width:34px;height:${Math.max(6, (count / maxMonth) * 80)}px;background:linear-gradient(180deg,#5B5BFF,#4C4CFF);border-radius:6px 6px 2px 2px"></div>
+          <div style="font-size:10.5px;color:var(--text-faint)">${monthLabel(ym)}</div>
+        </div>`).join("")}
+    </div>` : `<p style="color:var(--text-faint);font-size:13px">No enrollments with a joining date yet.</p>`;
+
+  host.innerHTML = `<div class="overlay" id="dashboardOverlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head"><h2>Business Dashboard</h2><button class="icon-btn" id="dashboardClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
+
+      <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594);margin-bottom:16px;animation:none;opacity:1;transform:none">
+        <div class="stat-label">&#8377; Total Revenue (Enrolled Students)</div>
+        <div class="stat-value">₹${totalRevenue.toLocaleString("en-IN")}</div>
+      </div>
+
+      <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:8px">Conversion by Lead Source</div>
+      ${sourceRows}
+
+      <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Course</div>
+      ${courseRows}
+
+      <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 4px">Enrollment Trend (last 6 months)</div>
+      ${monthBars}
+
+      <div class="modal-actions"><button class="btn btn-brass" id="dashboardDone">Close</button></div>
+    </div>
+  </div>`;
+
+  document.getElementById("dashboardOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "dashboardOverlay") closeDashboard(); });
+  document.getElementById("dashboardClose").addEventListener("click", closeDashboard);
+  document.getElementById("dashboardDone").addEventListener("click", closeDashboard);
+}
+
 /* ---------- CSV export ---------- */
 function exportCSV() {
   const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Type", "Class Timing", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
@@ -1131,6 +1312,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("exportBtn").addEventListener("click", exportCSV);
   document.getElementById("scheduleBtn").addEventListener("click", openScheduleBtn);
   document.getElementById("attendanceBtn").addEventListener("click", openAttendanceBtn);
+  document.getElementById("dashboardBtn").addEventListener("click", openDashboardBtn);
   document.getElementById("customizeBtn").addEventListener("click", () => {
     if (!canAdd()) { showError("Please sign in with an approved Google account to customize the register."); return; }
     settingsOpen = true; renderSettings();
