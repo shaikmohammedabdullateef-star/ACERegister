@@ -25,6 +25,7 @@ let state = {
   statusFilter: "All",
   sourceFilter: "All",
   tutorFilter: "All",
+  view: "directory", // "directory" shows the tutor list first; "list" shows a specific tutor's students
   editing: null,
   confirmDeleteId: null,
 };
@@ -89,6 +90,8 @@ let unsubSchedule = null;
 let scheduleSlots = [];
 let unsubAttendance = null;
 let attendanceToday = [];
+let unsubTargets = null;
+let targetDocs = []; // [{id, tutorName, month, target}]
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -124,14 +127,17 @@ function initCloud() {
       if (unsubSettings) { unsubSettings(); unsubSettings = null; }
       if (unsubSchedule) { unsubSchedule(); unsubSchedule = null; }
       if (unsubAttendance) { unsubAttendance(); unsubAttendance = null; }
+      if (unsubTargets) { unsubTargets(); unsubTargets = null; }
       if (user) {
         subscribeSharedRecords();
         subscribeSharedSettings();
         subscribeSchedule();
         subscribeAttendance();
+        subscribeTargets();
       } else {
         scheduleSlots = [];
         attendanceToday = [];
+        targetDocs = [];
         load();
         render();
       }
@@ -265,19 +271,30 @@ function subscribeAttendance() {
       if (attendanceOpen && !reportView) renderAttendance();
     }, (err) => { if (handleShareError(err)) return; });
 }
-function punchIn() {
+function timeStringToISO(timeStr) {
+  if (!timeStr) return new Date().toISOString();
+  const [h, m] = timeStr.split(":").map(Number);
+  const d = new Date();
+  d.setHours(h || 0, m || 0, 0, 0);
+  return d.toISOString();
+}
+function nowAsTimeInput() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function punchIn(timeStr) {
   if (!currentUser) return;
   const id = `${todayStr()}_${currentUser.uid}`;
   firebase.firestore().collection("ace_attendance").doc(id).set({
     uid: currentUser.uid, name: currentUser.displayName || currentUser.email,
-    date: todayStr(), punchInTime: new Date().toISOString(), punchOutTime: null, status: "present",
+    date: todayStr(), punchInTime: timeStringToISO(timeStr), punchOutTime: null, status: "present",
   }, { merge: true }).then(playSuccess);
 }
-function punchOut() {
+function punchOut(timeStr) {
   if (!currentUser) return;
   const id = `${todayStr()}_${currentUser.uid}`;
   firebase.firestore().collection("ace_attendance").doc(id).set({
-    punchOutTime: new Date().toISOString(),
+    punchOutTime: timeStringToISO(timeStr),
   }, { merge: true }).then(playSuccess);
 }
 function markLeave() {
@@ -322,6 +339,36 @@ function loadMonthlyAttendanceReport() {
       renderAttendance();
     })
     .catch(() => { reportLoading = false; renderAttendance(); });
+}
+
+/* ---------- tutor targets (shared, customizable per tutor per month) ---------- */
+function subscribeTargets() {
+  unsubTargets = firebase.firestore().collection("ace_targets")
+    .onSnapshot((snap) => {
+      targetDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      if (targetsOpen) renderTargets();
+    }, (err) => { if (handleShareError(err)) return; });
+}
+function setTarget(tutorName, month, targetValue) {
+  const id = `${month}_${tutorName.replace(/[^a-zA-Z0-9]/g, "_")}`;
+  if (!cloudEnabled || !currentUser) {
+    const idx = targetDocs.findIndex((t) => t.id === id);
+    const doc = { id, tutorName, month, target: targetValue };
+    if (idx >= 0) targetDocs[idx] = doc; else targetDocs.push(doc);
+    renderTargets();
+    return;
+  }
+  firebase.firestore().collection("ace_targets").doc(id).set({
+    tutorName, month, target: targetValue,
+    updatedBy: currentUser ? (currentUser.displayName || currentUser.email) : "device",
+  }).catch(() => showError("Couldn't save this target — try again."));
+}
+function actualForTutorMonth(tutorName, month) {
+  return state.records.filter((r) =>
+    (r.createdByName || "Unassigned") === tutorName &&
+    r.status === "Enrolled" &&
+    r.joiningDate && r.joiningDate.slice(0, 7) === month
+  ).length;
 }
 
 /* Writes a single record document. Ownership fields are only ever set on
@@ -539,6 +586,8 @@ function animateCounts() {
 }
 
 function renderToolbar() {
+  const host = document.getElementById("toolbar");
+  if (state.view !== "list") { host.innerHTML = ""; return; }
   const statusOpts = ["All", ...STATUSES].map((o) => `<option value="${esc(o)}" ${state.statusFilter === o ? "selected" : ""}>${o === "All" ? "Status: All" : esc(o)}</option>`).join("");
   const sourceOpts = ["All", ...state.sources].map((o) => `<option value="${esc(o)}" ${state.sourceFilter === o ? "selected" : ""}>${o === "All" ? "Source: All" : esc(o)}</option>`).join("");
   const tutors = distinctTutors();
@@ -548,8 +597,9 @@ function renderToolbar() {
     const bg = c === "All" ? "var(--ink)" : courseColor(c);
     return `<button class="tab ${active ? "active" : ""}" style="${active ? `background:${bg}` : ""}" data-course-tab="${esc(c)}">${esc(c)}</button>`;
   }).join("");
-  document.getElementById("toolbar").innerHTML = `
+  host.innerHTML = `
     <div class="toolbar-row">
+      <button class="btn btn-light" id="backToTutorsBtn">&#8592; All Tutors</button>
       <div class="search-wrap"><span class="search-icon">&#128269;</span>
         <input id="searchInput" placeholder="Search by name or contact number…" value="${esc(state.search)}" />
       </div>
@@ -559,6 +609,10 @@ function renderToolbar() {
     </div>
     <div class="tabs">${tabs}</div>
   `;
+  document.getElementById("backToTutorsBtn").addEventListener("click", () => {
+    state.view = "directory"; state.tutorFilter = "All"; state.search = "";
+    render();
+  });
   document.getElementById("searchInput").addEventListener("input", (e) => { state.search = e.target.value; renderRecords(); });
   document.getElementById("statusFilter").addEventListener("change", (e) => { state.statusFilter = e.target.value; renderRecords(); });
   document.getElementById("sourceFilter").addEventListener("change", (e) => { state.sourceFilter = e.target.value; renderRecords(); });
@@ -568,7 +622,59 @@ function renderToolbar() {
   });
 }
 
+function tutorStats(name) {
+  const mine = state.records.filter((r) => (r.createdByName || "Unassigned") === name);
+  return {
+    total: mine.length,
+    enrolled: mine.filter((r) => r.status === "Enrolled").length,
+    pending: mine.filter((r) => r.followedUp !== "Yes").length,
+  };
+}
+
+function openTutorView(name) {
+  state.tutorFilter = name;
+  state.view = "list";
+  state.search = "";
+  render();
+}
+
+function renderTutorDirectory() {
+  const wrap = document.getElementById("recordsWrap");
+  const tutors = distinctTutors();
+  if (tutors.length === 0) {
+    wrap.innerHTML = `<div class="empty"><div style="font-size:26px;opacity:.5">&#128101;</div>
+      <p>${!canAdd() ? "Sign in with an approved Google account to view the tutor directory." : "No tutors have added students yet. Tap Add Entry to begin."}</p></div>`;
+    return;
+  }
+  const cards = tutors.map((name, i) => {
+    const s = tutorStats(name);
+    const color = courseColor(name);
+    const delay = Math.min(i, 10) * 0.05;
+    return `<div class="record tutor-card" data-tutor="${esc(name)}" style="--course-color:${color};transition-delay:${delay}s;cursor:pointer">
+      <div class="record-top">
+        <div style="flex:1 1 200px">
+          <div class="record-name-row">
+            <span class="record-name">&#128100; ${esc(name)}</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-item">&#128101; ${s.total} student${s.total === 1 ? "" : "s"}</span>
+            <span class="meta-item" style="color:#12A594;font-weight:700">&#9989; ${s.enrolled} enrolled</span>
+            ${s.pending ? `<span class="meta-item" style="color:#E64A6B;font-weight:700">&#128276; ${s.pending} pending</span>` : ""}
+          </div>
+        </div>
+        <div class="record-right"><span class="icon-btn" style="color:${color};border-color:${color}33">&#8594;</span></div>
+      </div>
+    </div>`;
+  }).join("");
+  wrap.innerHTML = `<div class="records">${cards}</div>`;
+  document.querySelectorAll(".tutor-card").forEach((el) => {
+    el.addEventListener("click", () => openTutorView(el.dataset.tutor));
+  });
+  observeReveal();
+}
+
 function renderRecords() {
+  if (state.view !== "list") { renderTutorDirectory(); return; }
   const list = filteredRecords();
   const wrap = document.getElementById("recordsWrap");
   if (list.length === 0) {
@@ -742,8 +848,14 @@ function renderModal() {
     }
     writeRecord(updated, isNew);
     playSuccess();
+    if (isNew) {
+      state.view = "list";
+      state.tutorFilter = updated.createdByName || (currentUser ? (currentUser.displayName || currentUser.email) : "All");
+    }
     state.editing = null;
     renderModal();
+    renderToolbar();
+    renderRecords();
   });
 }
 
@@ -1076,15 +1188,20 @@ function renderAttendance() {
       </div>
 
       ${!reportView ? `
-        <div style="display:flex;gap:8px;margin-bottom:12px">
-          <button class="btn btn-brass" id="punchInBtn" style="flex:1;justify-content:center;padding:10px" ${mine && (mine.punchInTime || mine.status === "leave") ? "disabled" : ""}>&#9203; Punch In</button>
-          <button class="btn btn-light" id="punchOutBtn" style="flex:1;justify-content:center;padding:10px" ${!mine || !mine.punchInTime || mine.punchOutTime ? "disabled" : ""}>&#128683; Punch Out</button>
+        <div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:8px">Type your time, then confirm — for reliable, accurate records</div>
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+          <input type="time" id="loginTimeInput" value="${mine && mine.punchInTime ? new Date(mine.punchInTime).toTimeString().slice(0, 5) : nowAsTimeInput()}" style="padding:8px;border:1px solid var(--surface-line);border-radius:9px;font-size:13px;background:var(--surface-solid);color:var(--text-main);flex:1" ${mine && (mine.punchInTime || mine.status === "leave") ? "disabled" : ""} />
+          <button class="btn btn-brass" id="punchInBtn" style="padding:9px 14px" ${mine && (mine.punchInTime || mine.status === "leave") ? "disabled" : ""}>&#9203; Login</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+          <input type="time" id="logoutTimeInput" value="${mine && mine.punchOutTime ? new Date(mine.punchOutTime).toTimeString().slice(0, 5) : nowAsTimeInput()}" style="padding:8px;border:1px solid var(--surface-line);border-radius:9px;font-size:13px;background:var(--surface-solid);color:var(--text-main);flex:1" ${!mine || !mine.punchInTime || mine.punchOutTime ? "disabled" : ""} />
+          <button class="btn btn-light" id="punchOutBtn" style="padding:9px 14px" ${!mine || !mine.punchInTime || mine.punchOutTime ? "disabled" : ""}>&#128683; Logout</button>
         </div>
         <button class="btn btn-light" id="leaveBtn" style="width:100%;justify-content:center;padding:8px;margin-bottom:14px" ${mine && (mine.punchInTime || mine.status === "leave") ? "disabled" : ""}>&#127796; Mark Today as Leave</button>
-        <div style="font-size:12px;font-weight:700;color:#5c5386;margin-bottom:6px">Today's log (shared, all tutors)</div>
+        <div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:6px">Today's log (shared, all tutors)</div>
         <div style="display:flex;flex-direction:column;gap:6px">${todayRows}</div>
       ` : `
-        <div style="font-size:12px;font-weight:700;color:#5c5386;margin-bottom:10px">${monthLabel} — present vs leave per tutor</div>
+        <div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:10px">${monthLabel} — present vs leave per tutor</div>
         <div style="display:flex;flex-direction:column;gap:8px">${reportRows}</div>
       `}
 
@@ -1098,8 +1215,8 @@ function renderAttendance() {
   document.getElementById("tabToday").addEventListener("click", () => { reportView = false; renderAttendance(); });
   document.getElementById("tabReport").addEventListener("click", () => { reportView = true; loadMonthlyAttendanceReport(); });
   if (!reportView) {
-    document.getElementById("punchInBtn").addEventListener("click", punchIn);
-    document.getElementById("punchOutBtn").addEventListener("click", punchOut);
+    document.getElementById("punchInBtn").addEventListener("click", () => punchIn(document.getElementById("loginTimeInput").value));
+    document.getElementById("punchOutBtn").addEventListener("click", () => punchOut(document.getElementById("logoutTimeInput").value));
     document.getElementById("leaveBtn").addEventListener("click", markLeave);
   }
 }
@@ -1202,6 +1319,93 @@ function renderDashboard() {
   document.getElementById("dashboardOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "dashboardOverlay") closeDashboard(); });
   document.getElementById("dashboardClose").addEventListener("click", closeDashboard);
   document.getElementById("dashboardDone").addEventListener("click", closeDashboard);
+}
+
+/* ---------- tutor targets UI ---------- */
+let targetsOpen = false;
+let targetsMonth = todayStr().slice(0, 7);
+
+function monthOptions() {
+  const opts = [];
+  const now = new Date();
+  for (let i = -2; i <= 3; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    opts.push({ ym, label: d.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) });
+  }
+  return opts;
+}
+function openTargetsBtn() {
+  if (!canAdd()) { showError("Please sign in with an approved Google account to view targets."); return; }
+  targetsOpen = true;
+  renderTargets();
+}
+function closeTargets() { targetsOpen = false; renderTargets(); }
+
+function renderTargets() {
+  const host = document.getElementById("targetsHost");
+  if (!targetsOpen) { host.innerHTML = ""; return; }
+
+  const tutors = distinctTutors();
+  const monthOpts = monthOptions().map((o) => `<option value="${o.ym}" ${targetsMonth === o.ym ? "selected" : ""}>${o.label}</option>`).join("");
+
+  const rows = tutors.map((name) => {
+    const tId = `${targetsMonth}_${name.replace(/[^a-zA-Z0-9]/g, "_")}`;
+    const tDoc = targetDocs.find((t) => t.id === tId);
+    const target = tDoc ? tDoc.target : 0;
+    const actual = actualForTutorMonth(name, targetsMonth);
+    const pct = target ? Math.min(150, Math.round((actual / target) * 100)) : 0;
+    const barColor = pct >= 100 ? "#12A594" : pct >= 60 ? "#F5A623" : "#E64A6B";
+    return `<div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
+        <span style="font-weight:700;font-size:13px">${esc(name)}</span>
+        <span style="font-size:12px;color:var(--text-muted)">${actual} / <input type="number" min="0" class="target-input" data-tutor="${esc(name)}" value="${target}" style="width:52px;padding:3px 5px;border:1px solid var(--surface-line);border-radius:6px;font-size:12px;background:var(--surface-solid);color:var(--text-main)" /> target</span>
+      </div>
+      <div style="background:var(--surface-line);border-radius:999px;height:10px;overflow:hidden">
+        <div style="width:${Math.min(100, pct)}%;height:100%;background:${barColor};border-radius:999px;transition:width .6s var(--ease)"></div>
+      </div>
+    </div>`;
+  }).join("") || `<p style="color:var(--text-faint);font-size:13px">No tutors yet — add a student first.</p>`;
+
+  const totalTarget = tutors.reduce((sum, name) => {
+    const tId = `${targetsMonth}_${name.replace(/[^a-zA-Z0-9]/g, "_")}`;
+    const tDoc = targetDocs.find((t) => t.id === tId);
+    return sum + (tDoc ? tDoc.target : 0);
+  }, 0);
+  const totalActual = tutors.reduce((sum, name) => sum + actualForTutorMonth(name, targetsMonth), 0);
+  const totalPct = totalTarget ? Math.round((totalActual / totalTarget) * 100) : 0;
+
+  host.innerHTML = `<div class="overlay" id="targetsOverlay">
+    <div class="modal" style="max-width:540px">
+      <div class="modal-head"><h2>Tutor Targets</h2><button class="icon-btn" id="targetsClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
+
+      <select class="filter-select" id="targetsMonthSelect" style="margin-bottom:14px">${monthOpts}</select>
+
+      <div class="stat-card" style="--grad:linear-gradient(135deg,#5B5BFF,#4C4CFF);margin-bottom:16px;animation:none;opacity:1;transform:none">
+        <div class="stat-label">&#127919; Team Total: ${totalActual} / ${totalTarget} enrolled (${totalPct}%)</div>
+        <div style="background:rgba(255,255,255,0.25);border-radius:999px;height:10px;overflow:hidden;margin-top:6px">
+          <div style="width:${Math.min(100, totalPct)}%;height:100%;background:#fff;border-radius:999px"></div>
+        </div>
+      </div>
+
+      <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:10px">Per Tutor — actual vs target (editable)</div>
+      ${rows}
+
+      <div class="modal-actions"><button class="btn btn-brass" id="targetsDone">Close</button></div>
+    </div>
+  </div>`;
+
+  document.getElementById("targetsOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "targetsOverlay") closeTargets(); });
+  document.getElementById("targetsClose").addEventListener("click", closeTargets);
+  document.getElementById("targetsDone").addEventListener("click", closeTargets);
+  document.getElementById("targetsMonthSelect").addEventListener("change", (e) => { targetsMonth = e.target.value; renderTargets(); });
+  document.querySelectorAll(".target-input").forEach((inp) => {
+    inp.addEventListener("change", (e) => {
+      const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+      setTarget(e.target.dataset.tutor, targetsMonth, val);
+      playSuccess();
+    });
+  });
 }
 
 /* ---------- CSV export ---------- */
@@ -1313,12 +1517,15 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("scheduleBtn").addEventListener("click", openScheduleBtn);
   document.getElementById("attendanceBtn").addEventListener("click", openAttendanceBtn);
   document.getElementById("dashboardBtn").addEventListener("click", openDashboardBtn);
+  document.getElementById("targetsBtn").addEventListener("click", openTargetsBtn);
   document.getElementById("customizeBtn").addEventListener("click", () => {
     if (!canAdd()) { showError("Please sign in with an approved Google account to customize the register."); return; }
     settingsOpen = true; renderSettings();
   });
   render();
   initCloud();
+
+  setTimeout(() => { document.getElementById("splashScreen")?.remove(); }, 2200);
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
