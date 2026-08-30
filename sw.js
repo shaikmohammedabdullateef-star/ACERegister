@@ -1,5 +1,8 @@
-const CACHE = "ace-register-v2";
-const ASSETS = ["./", "./index.html", "./style.css", "./app.js", "./firebase-config.js", "./manifest.json", "./icon-192.png", "./icon-512.png", "./logo-small.png"];
+const CACHE = "ace-register-supabase-v1";
+const ASSETS = [
+  "./", "./index.html", "./style.css", "./app.js", "./supabase-config.js",
+  "./manifest.json", "./icon-192.png", "./icon-512.png", "./logo-small.png",
+];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
@@ -13,7 +16,15 @@ self.addEventListener("activate", (e) => {
   self.clients.claim();
 });
 
+// Network-first for the app shell (so updates show immediately when
+// online), falling back to cache when offline. Supabase API calls
+// (different origin) are never intercepted here — they pass straight
+// through to the network, and the app's own IndexedDB queue handles
+// the case where that fails.
 self.addEventListener("fetch", (e) => {
+  const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin) return; // let Supabase requests go straight through
+
   e.respondWith(
     fetch(e.request)
       .then((res) => {

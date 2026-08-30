@@ -245,6 +245,48 @@ select.filter-select{padding:8px 26px 8px 9px;border:1px solid var(--surface-lin
   .form-grid{grid-template-columns:1fr;}
 }
 
+/* ---------- attendance feed (WhatsApp-style) ---------- */
+.day-group-label{font-family:var(--font-display);font-weight:700;font-size:13px;color:var(--text-muted);margin:14px 0 8px;text-align:center;}
+.day-group-label:first-child{margin-top:0;}
+.feed-bubble{
+  background:var(--surface-solid); border:1px solid var(--surface-line); border-radius:14px;
+  padding:10px 13px; margin-bottom:8px; max-width:88%;
+  box-shadow:0 2px 8px rgba(0,0,0,0.06);
+}
+.feed-bubble.login{border-left:4px solid #12A594;}
+.feed-bubble.logout{border-left:4px solid #E64A6B;}
+.feed-bubble.leave{border-left:4px solid #8B5CF6;}
+.feed-bubble .feed-name{font-weight:700; font-size:13px; color:var(--text-main);}
+.feed-bubble .feed-action{font-size:12.5px; color:var(--text-muted); margin-top:2px;}
+.feed-bubble .feed-time{font-size:10.5px; color:var(--text-faint); margin-top:4px; display:flex; justify-content:space-between; align-items:center;}
+.offline-badge{background:#E64A6B; color:#fff; font-size:11px; font-weight:700; padding:5px 10px; border-radius:8px; display:flex; align-items:center; gap:4px;}
+
+/* ---------- slot grid ---------- */
+.slot-card{
+  background:var(--surface); border:1px solid var(--surface-line); border-radius:12px;
+  padding:10px 12px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:10px;
+}
+.slot-card.empty{border-left:4px solid #12A594;}
+.slot-card.filled{border-left:4px solid #E64A6B;}
+.slot-time{font-family:var(--font-mono); font-weight:700; font-size:13px; min-width:100px;}
+.slot-meta{font-size:11.5px; color:var(--text-muted); display:flex; gap:8px; flex-wrap:wrap;}
+
+/* ---------- desktop / tablet responsive scaling ---------- */
+@media (min-width: 768px){
+  main{ padding-left:24px; padding-right:24px; }
+  .form-grid{ gap:14px; }
+}
+@media (min-width: 1280px){
+  header.cover .cover-inner, main{ max-width:1180px; }
+  .stats{ grid-template-columns:repeat(4, 1fr); }
+  .records{ display:grid; grid-template-columns:repeat(2, 1fr); gap:12px; align-items:start; }
+  .modal{ max-width:640px; }
+}
+@media (max-width: 380px){
+  .header-actions .btn{ font-size:11.5px; padding:6px 9px; }
+  .brand h1{ font-size:16px; }
+}
+
 /* ---------- opening splash ---------- */
 #splashScreen{
   position:fixed; inset:0; z-index:999;

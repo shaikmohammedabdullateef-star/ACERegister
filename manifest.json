@@ -1,13 +1,13 @@
 {
   "name": "ACE Skills Development Center — Register",
   "short_name": "ACE Register",
-  "description": "Lead and student register for ACE Skills Development Center",
+  "description": "Lead, student, attendance, and tutor schedule register for ACE Skills Development Center",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#24352B",
-  "theme_color": "#24352B",
-  "orientation": "portrait",
+  "background_color": "#1E1547",
+  "theme_color": "#1E1547",
+  "orientation": "portrait-primary",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
