@@ -269,6 +269,7 @@ async function writeRecord(record, isNew) {
 async function deleteRecordRemote(id) {
   state.records = state.records.filter((x) => x.id !== id);
   renderRecords();
+  playDelete();
   await writeWithOfflineFallback("students", "delete", { id });
 }
 
@@ -301,6 +302,7 @@ async function postAttendance(type, timeStr) {
 async function deleteAttendanceEntry(id) {
   attendanceFeed = attendanceFeed.filter((a) => a.id !== id);
   renderAttendance();
+  playDelete();
   await writeWithOfflineFallback("attendance_log", "delete", { id });
 }
 
@@ -322,6 +324,7 @@ async function writeSlot(slot, isNew) {
 async function deleteSlot(id) {
   slotList = slotList.filter((x) => x.id !== id);
   renderSchedule();
+  playDelete();
   await writeWithOfflineFallback("tutor_slots", "delete", { id });
 }
 function distinctSlotTutors() {
@@ -387,23 +390,50 @@ function observeReveal() {
 
 /* ---------- renewal reminders ---------- */
 let bannerDismissed = false;
-function upcomingRenewals() {
-  return state.records.filter((r) => r.status === "Enrolled" && r.renewalDate)
-    .map((r) => ({ r, days: daysUntil(r.renewalDate) })).filter((x) => x.days !== null && x.days <= 7)
+function upcomingRenewals(maxDays, onlyMine) {
+  return state.records
+    .filter((r) => r.status === "Enrolled" && r.renewalDate && (!onlyMine || r.createdBy === currentUser?.id))
+    .map((r) => ({ r, days: daysUntil(r.renewalDate) }))
+    .filter((x) => x.days !== null && x.days <= maxDays)
     .sort((a, b) => a.days - b.days);
 }
 function renderRenewalBanner() {
   const host = document.getElementById("bannerHost");
   if (bannerDismissed) { host.innerHTML = ""; return; }
-  const list = upcomingRenewals();
-  if (!list.length) { host.innerHTML = ""; return; }
-  const overdue = list.filter((x) => x.days < 0);
-  const cls = overdue.length ? "banner-overdue" : "banner-renew";
-  const names = list.slice(0, 4).map((x) => `${esc(x.r.name)} (${x.days < 0 ? `${Math.abs(x.days)}d overdue` : x.days === 0 ? "today" : `in ${x.days}d`})`).join(", ");
-  host.innerHTML = `<div class="banner ${cls}"><span>${overdue.length ? "\u{1F6A8}" : "\u{1F514}"}</span>
-    <span><b>${list.length} renewal${list.length > 1 ? "s" : ""} due soon:</b> ${names}${list.length > 4 ? ` +${list.length - 4} more` : ""}</span>
-    <button class="banner-close" id="bannerCloseBtn">&#10005; Dismiss</button></div>`;
-  document.getElementById("bannerCloseBtn").addEventListener("click", () => { bannerDismissed = true; renderRenewalBanner(); });
+  const all = upcomingRenewals(7, false);
+  if (!all.length) { host.innerHTML = ""; return; }
+  const urgent = all.filter((x) => x.days <= 3);
+  const soon = all.filter((x) => x.days > 3);
+  const label = (x) => `${esc(x.r.name)} (${x.days < 0 ? `${Math.abs(x.days)}d overdue` : x.days === 0 ? "today" : `in ${x.days}d`})`;
+  const block = (list, cls, icon, title) => list.length ? `<div class="banner ${cls}"><span>${icon}</span>
+    <span><b>${title}:</b> ${list.slice(0, 4).map(label).join(", ")}${list.length > 4 ? ` +${list.length - 4} more` : ""}</span></div>` : "";
+  host.innerHTML = `
+    ${block(urgent, "banner-overdue", "\u{1F6A8}", `${urgent.length} renewal${urgent.length > 1 ? "s" : ""} due within 3 days`)}
+    ${block(soon, "banner-renew", "\u{1F514}", `${soon.length} renewal${soon.length > 1 ? "s" : ""} due within a week`)}
+    <div style="text-align:right;margin-bottom:10px"><button class="banner-close" id="bannerCloseBtn">&#10005; Dismiss</button></div>`;
+  document.getElementById("bannerCloseBtn")?.addEventListener("click", () => { bannerDismissed = true; renderRenewalBanner(); });
+}
+
+let notified7 = false, notified3 = false;
+function maybeNotifyRenewals() {
+  if (!currentUser || !("Notification" in window)) return;
+  const mine7 = upcomingRenewals(7, true);
+  const mine3 = upcomingRenewals(3, true);
+  const today = todayStr();
+  const fire = (list, key, title) => {
+    if (!list.length || (key === "3" ? notified3 : notified7)) return;
+    const storeKey = `ace_notif_${key}_${today}`;
+    if (localStorage.getItem(storeKey)) { if (key === "3") notified3 = true; else notified7 = true; return; }
+    const show = () => {
+      try { new Notification(title, { body: `${list.length} of your student${list.length > 1 ? "s" : ""}: ${list.map((x) => x.r.name).join(", ")}`, icon: "./icon-192.png" }); } catch (e) {}
+      localStorage.setItem(storeKey, "1");
+      if (key === "3") notified3 = true; else notified7 = true;
+    };
+    if (Notification.permission === "granted") show();
+    else if (Notification.permission !== "denied") Notification.requestPermission().then((p) => { if (p === "granted") show(); });
+  };
+  fire(mine3, "3", "ACE Register — Renewal due within 3 days");
+  fire(mine7, "7", "ACE Register — Renewal due within 7 days");
 }
 
 /* ---------- main render ---------- */
@@ -636,7 +666,8 @@ function renderAttendance() {
       const time = new Date(a.entry_time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
       const actionLabel = a.entry_type === "login" ? "Logged in" : a.entry_type === "logout" ? "Logged out" : "On leave";
       const mine = currentUser && a.tutor_id === currentUser.id;
-      const delBtn = (mine || isAdmin()) ? `<button data-del-att="${a.id}" style="border:none;background:none;color:var(--brick);cursor:pointer;font-size:11px">Delete</button>` : "";
+      const canDel = mine || isAdmin();
+      const delBtn = canDel ? `<button data-del-att="${a.id}" style="border:none;background:none;color:var(--brick);cursor:pointer;font-size:11px">Delete</button>` : "";
       return `<div class="feed-bubble ${a.entry_type}"><div class="feed-name">${esc(a.tutor_name)}</div><div class="feed-action">${actionLabel} · ${time}</div><div class="feed-time">posted ${new Date(a.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}<span>${delBtn}</span></div></div>`;
     }).join("");
     return `<div class="day-group-label">${label}</div>${bubbles}`;
@@ -850,14 +881,37 @@ function exportCSV() {
   const a = document.createElement("a"); a.href = url; a.download = "ace_register.csv"; a.click(); URL.revokeObjectURL(url);
 }
 
-/* ---------- sound + theme (kept from previous version) ---------- */
+/* ---------- sound + theme ---------- */
 let audioCtx = null, soundOn = true;
 function loadSoundPref() { try { const v = localStorage.getItem("ace_sound"); if (v !== null) soundOn = v === "1"; } catch (e) {} }
 function getAudioCtx() { if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } } if (audioCtx.state === "suspended") audioCtx.resume(); return audioCtx; }
 function tone(freq, dur, type, vol, delay) { if (!soundOn) return; const ctx = getAudioCtx(); if (!ctx) return; const t0 = ctx.currentTime + (delay || 0); const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.type = type || "sine"; osc.frequency.setValueAtTime(freq, t0); gain.gain.setValueAtTime(0.0001, t0); gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.006); gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur); osc.connect(gain).connect(ctx.destination); osc.start(t0); osc.stop(t0 + dur + 0.03); }
 function playClick() { tone(760, 0.055, "sine", 0.045); }
+function playType() { tone(1350 + Math.random() * 220, 0.018, "square", 0.018); }
 function playSuccess() { tone(660, 0.09, "sine", 0.05); tone(990, 0.12, "sine", 0.05, 0.09); }
-function initSoundUI() { loadSoundPref(); document.addEventListener("click", (e) => { if (e.target.closest(".btn, .icon-btn, .tab")) playClick(); }); }
+function playDelete() { tone(320, 0.12, "sawtooth", 0.035); }
+function renderSoundBtn() {
+  const btn = document.getElementById("soundBtn");
+  if (!btn) return;
+  btn.innerHTML = soundOn ? "&#128266; Sound" : "&#128263; Muted";
+  btn.style.opacity = soundOn ? "1" : ".65";
+}
+function toggleSound() {
+  soundOn = !soundOn;
+  try { localStorage.setItem("ace_sound", soundOn ? "1" : "0"); } catch (e) {}
+  renderSoundBtn();
+  if (soundOn) playClick();
+}
+function initSoundUI() {
+  loadSoundPref();
+  renderSoundBtn();
+  document.getElementById("soundBtn")?.addEventListener("click", toggleSound);
+  document.addEventListener("click", (e) => { if (e.target.closest(".btn, .icon-btn, .tab")) playClick(); });
+  document.addEventListener("keydown", (e) => {
+    const tag = e.target.tagName;
+    if ((tag === "INPUT" || tag === "TEXTAREA") && e.key.length === 1) playType();
+  });
+}
 function applyTheme(name) { document.documentElement.setAttribute("data-theme", name); try { localStorage.setItem("ace_theme", name); } catch (e) {} ["Default", "Light", "Dark"].forEach((n) => document.getElementById(`theme${n}`)?.classList.toggle("active", n.toLowerCase() === name)); }
 function initThemeUI() { let saved = "default"; try { saved = localStorage.getItem("ace_theme") || "default"; } catch (e) {} applyTheme(saved); document.getElementById("themeDefault").addEventListener("click", () => applyTheme("default")); document.getElementById("themeLight").addEventListener("click", () => applyTheme("light")); document.getElementById("themeDark").addEventListener("click", () => applyTheme("dark")); }
 
