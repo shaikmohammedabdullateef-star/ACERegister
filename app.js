@@ -700,10 +700,36 @@ function renderAttendance() {
 
 /* ---------- tutor slots UI ---------- */
 let scheduleOpen = false, scheduleTutorFilter = "All", scheduleEditing = null, scheduleConfirmDeleteId = null;
+let scheduleView = "today"; // "today" = daily class register table, "week" = availability view
+let slotAttendance = []; // today's P/A marks: [{slot_id, student_name, status}]
+
+async function fetchSlotAttendance() {
+  if (!isAuthorized) return;
+  const { data, error } = await sb.from("slot_attendance").select("*").eq("attendance_date", todayStr());
+  if (!error) slotAttendance = data || [];
+}
+function attendanceFor(slotId, studentName) {
+  const row = slotAttendance.find((a) => a.slot_id === slotId && a.student_name === studentName);
+  return row ? row.status : "P"; // default to Present until marked otherwise
+}
+async function toggleStudentAttendance(slotId, studentName) {
+  const current = attendanceFor(slotId, studentName);
+  const next = current === "P" ? "A" : "P";
+  const idx = slotAttendance.findIndex((a) => a.slot_id === slotId && a.student_name === studentName);
+  const row = { slot_id: slotId, attendance_date: todayStr(), student_name: studentName, status: next, marked_by: currentUser?.id };
+  if (idx >= 0) slotAttendance[idx] = { ...slotAttendance[idx], ...row }; else slotAttendance.push(row);
+  renderSchedule();
+  playClick();
+  await sb.from("slot_attendance").upsert(row, { onConflict: "slot_id,attendance_date,student_name" });
+}
+function todayWeekdayName() {
+  return WEEKDAYS[(new Date().getDay() + 6) % 7]; // getDay(): Sun=0 -> map to Monday-first WEEKDAYS array
+}
+
 function emptySlot() { return { id: uid(), day_of_week: WEEKDAYS[0], start_time: "09:00", end_time: "10:00", mode: "Offline", slot_type: "Group", student_names: [], tutor_id: null, tutor_name: "" }; }
 function openScheduleBtn() {
   if (!canAdd()) { showError("Please sign in with an approved Google account to view slots."); return; }
-  scheduleOpen = true; fetchSlots(); renderSchedule();
+  scheduleOpen = true; scheduleView = "today"; fetchSlots(); fetchSlotAttendance(); renderSchedule();
 }
 function closeSchedule() { scheduleOpen = false; scheduleEditing = null; renderSchedule(); }
 function canEditSlot(s) { if (!isAuthorized) return false; if (isAdmin()) return true; return s.tutor_id === currentUser.id; }
@@ -714,6 +740,88 @@ function renderSchedule() {
   const tutors = distinctSlotTutors();
   const tutorOpts = ["All", ...tutors].map((t) => `<option value="${esc(t)}" ${scheduleTutorFilter === t ? "selected" : ""}>${t === "All" ? "Tutor: All" : esc(t)}</option>`).join("");
   const filtered = scheduleTutorFilter === "All" ? slotList : slotList.filter((s) => (s.tutor_name || "Unassigned") === scheduleTutorFilter);
+
+  const bodyHTML = scheduleView === "today" ? renderTodayTable(filtered) : renderWeekView(filtered);
+
+  host.innerHTML = `<div class="overlay" id="scheduleOverlay"><div class="modal" style="max-width:640px">
+    <div class="modal-head"><h2>Tutor Slots</h2><button class="icon-btn" id="scheduleClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
+    <div class="tabs" style="margin-bottom:12px">
+      <button class="tab ${scheduleView === "today" ? "active" : ""}" style="${scheduleView === "today" ? "background:var(--ink)" : ""}" id="tabToday">Today's Classes</button>
+      <button class="tab ${scheduleView === "week" ? "active" : ""}" style="${scheduleView === "week" ? "background:var(--ink)" : ""}" id="tabWeek">Full Week (availability)</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+      ${tutors.length > 1 ? `<select class="filter-select" id="scheduleTutorFilter">${tutorOpts}</select>` : ""}
+      <button class="btn btn-brass" id="addSlotBtn" style="margin-left:auto">&#65291; Add Slot</button></div>
+    ${bodyHTML}
+    <div class="modal-actions"><button class="btn btn-light" id="scheduleDone">Close</button></div>
+  </div></div>`;
+
+  document.getElementById("scheduleOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "scheduleOverlay") closeSchedule(); });
+  document.getElementById("scheduleClose").addEventListener("click", closeSchedule);
+  document.getElementById("scheduleDone").addEventListener("click", closeSchedule);
+  document.getElementById("tabToday").addEventListener("click", () => { scheduleView = "today"; renderSchedule(); });
+  document.getElementById("tabWeek").addEventListener("click", () => { scheduleView = "week"; renderSchedule(); });
+  document.getElementById("scheduleTutorFilter")?.addEventListener("change", (e) => { scheduleTutorFilter = e.target.value; renderSchedule(); });
+  document.getElementById("addSlotBtn").addEventListener("click", () => { if (!canAdd()) { showError("Please sign in to add a slot."); return; } scheduleEditing = emptySlot(); renderSchedule(); });
+
+  filtered.forEach((s) => {
+    document.getElementById(`slotedit-${s.id}`)?.addEventListener("click", () => { if (canEditSlot(s)) { scheduleEditing = { ...s }; renderSchedule(); } });
+    document.getElementById(`slotdel-${s.id}`)?.addEventListener("click", () => { scheduleConfirmDeleteId = s.id; renderSchedule(); });
+    document.getElementById(`slotdelyes-${s.id}`)?.addEventListener("click", () => { deleteSlot(s.id); scheduleConfirmDeleteId = null; });
+    document.getElementById(`slotdelno-${s.id}`)?.addEventListener("click", () => { scheduleConfirmDeleteId = null; renderSchedule(); });
+    (s.student_names || []).forEach((name) => {
+      document.getElementById(`patoggle-${s.id}-${slugify(name)}`)?.addEventListener("click", () => toggleStudentAttendance(s.id, name));
+    });
+  });
+}
+
+function slugify(s) { return String(s).replace(/[^a-zA-Z0-9]/g, "_"); }
+
+/* "Today's Classes" — a daily register table like a paper attendance
+   sheet: No. / Students (each with a tappable P/A mark) / Time / On-Off,
+   scoped to whichever weekday it actually is right now. */
+function renderTodayTable(filtered) {
+  const today = todayWeekdayName();
+  const slots = filtered.filter((s) => s.day_of_week === today).slice().sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+  if (!slots.length) {
+    return `<div class="empty" style="padding:30px"><p>No classes scheduled for ${today}${scheduleTutorFilter !== "All" ? ` (${esc(scheduleTutorFilter)})` : ""}. Add a slot for today to start tracking attendance.</p></div>`;
+  }
+  const rows = slots.map((s, i) => {
+    const editable = canEditSlot(s);
+    const students = s.student_names && s.student_names.length ? s.student_names : null;
+    const studentCell = students
+      ? students.map((name) => {
+          const status = attendanceFor(s.id, name);
+          const color = status === "P" ? "#12A594" : "#E64A6B";
+          const clickable = editable ? `id="patoggle-${s.id}-${slugify(name)}" style="cursor:pointer;` : `style="cursor:default;opacity:.85;`;
+          return `<span ${clickable}display:inline-flex;align-items:center;gap:4px;background:${color}18;color:${color};border:1px solid ${color}55;border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:700;margin:2px" title="${editable ? "Tap to toggle Present/Absent" : ""}">${esc(name)} · ${status}</span>`;
+        }).join("")
+      : `<span style="color:#12A594;font-weight:700;font-size:12px">Empty — available</span>`;
+    return `<tr>
+      <td style="padding:8px 6px;font-weight:700;color:var(--text-faint);vertical-align:top">${i + 1}</td>
+      <td style="padding:8px 6px;vertical-align:top">${studentCell}</td>
+      <td style="padding:8px 6px;font-family:var(--font-mono);font-weight:700;white-space:nowrap;vertical-align:top">${s.start_time?.slice(0, 5)}–${s.end_time?.slice(0, 5)}</td>
+      <td style="padding:8px 6px;white-space:nowrap;vertical-align:top">
+        <span class="stamp" style="color:${s.mode === "Online" ? "#0EA5E9" : "#8B5CF6"};border-color:${s.mode === "Online" ? "#0EA5E9" : "#8B5CF6"}">${s.mode}</span>
+        ${s.slot_type === "Group" ? `<div style="font-size:10.5px;color:var(--text-faint);margin-top:3px">Group batch</div>` : ""}
+      </td>
+      <td style="padding:8px 6px;vertical-align:top;white-space:nowrap">
+        ${editable ? `<button class="icon-btn" id="slotedit-${s.id}" style="color:#4C4CFF;border-color:#4C4CFF33">&#9998;</button>
+          <button class="icon-btn" id="slotdel-${s.id}" style="color:#E64A6B;border-color:#E64A6B33">&#128465;</button>`
+          : `<span class="icon-btn" style="color:#8378B0;border-color:#8378B033;cursor:default" title="Only ${esc(s.tutor_name)} can edit">&#128274;</span>`}
+      </td>
+    </tr>`;
+  }).join("");
+  return `<div style="font-size:12px;font-weight:700;color:var(--text-muted);margin-bottom:8px">${today} — tap a student's chip to mark them Present / Absent</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
+      <thead><tr style="text-align:left;border-bottom:2px solid var(--surface-line);color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px">
+        <th style="padding:6px">No</th><th style="padding:6px">Student(s)</th><th style="padding:6px">Time</th><th style="padding:6px">On/Off</th><th style="padding:6px"></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function renderWeekView(filtered) {
   const byDay = {}; WEEKDAYS.forEach((d) => (byDay[d] = []));
   filtered.forEach((s) => { (byDay[s.day_of_week] = byDay[s.day_of_week] || []).push(s); });
   const dayBlocks = WEEKDAYS.map((day) => {
@@ -741,26 +849,7 @@ function renderSchedule() {
     }).join("");
     return `<div style="margin-bottom:14px"><div style="font-family:var(--font-display);font-weight:700;font-size:13.5px;color:var(--text-muted);margin-bottom:6px">${day}</div>${rows}</div>`;
   }).join("");
-  const hasAny = filtered.length > 0;
-  host.innerHTML = `<div class="overlay" id="scheduleOverlay"><div class="modal" style="max-width:580px">
-    <div class="modal-head"><h2>Tutor Slots</h2><button class="icon-btn" id="scheduleClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
-      ${tutors.length > 1 ? `<select class="filter-select" id="scheduleTutorFilter">${tutorOpts}</select>` : ""}
-      <button class="btn btn-brass" id="addSlotBtn" style="margin-left:auto">&#65291; Add Slot</button></div>
-    ${hasAny ? dayBlocks : `<div class="empty" style="padding:30px"><p>No slots yet${scheduleTutorFilter !== "All" ? ` for ${esc(scheduleTutorFilter)}` : ""}. Add one to see your availability at a glance.</p></div>`}
-    <div class="modal-actions"><button class="btn btn-light" id="scheduleDone">Close</button></div>
-  </div></div>`;
-  document.getElementById("scheduleOverlay").addEventListener("mousedown", (e) => { if (e.target.id === "scheduleOverlay") closeSchedule(); });
-  document.getElementById("scheduleClose").addEventListener("click", closeSchedule);
-  document.getElementById("scheduleDone").addEventListener("click", closeSchedule);
-  document.getElementById("scheduleTutorFilter")?.addEventListener("change", (e) => { scheduleTutorFilter = e.target.value; renderSchedule(); });
-  document.getElementById("addSlotBtn").addEventListener("click", () => { if (!canAdd()) { showError("Please sign in to add a slot."); return; } scheduleEditing = emptySlot(); renderSchedule(); });
-  filtered.forEach((s) => {
-    document.getElementById(`slotedit-${s.id}`)?.addEventListener("click", () => { if (canEditSlot(s)) { scheduleEditing = { ...s }; renderSchedule(); } });
-    document.getElementById(`slotdel-${s.id}`)?.addEventListener("click", () => { scheduleConfirmDeleteId = s.id; renderSchedule(); });
-    document.getElementById(`slotdelyes-${s.id}`)?.addEventListener("click", () => { deleteSlot(s.id); scheduleConfirmDeleteId = null; });
-    document.getElementById(`slotdelno-${s.id}`)?.addEventListener("click", () => { scheduleConfirmDeleteId = null; renderSchedule(); });
-  });
+  return filtered.length ? dayBlocks : `<div class="empty" style="padding:30px"><p>No slots yet${scheduleTutorFilter !== "All" ? ` for ${esc(scheduleTutorFilter)}` : ""}. Add one to see your availability at a glance.</p></div>`;
 }
 function renderSlotForm() {
   const s = scheduleEditing;
