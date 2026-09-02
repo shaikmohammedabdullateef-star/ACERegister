@@ -939,19 +939,51 @@ function groupConversion(field) {
   state.records.forEach((r) => { const key = r[field] || "Unspecified"; if (!groups[key]) groups[key] = { total: 0, enrolled: 0 }; groups[key].total++; if (r.status === "Enrolled") groups[key].enrolled++; });
   return Object.entries(groups).map(([name, g]) => ({ name, total: g.total, enrolled: g.enrolled, pct: g.total ? Math.round((g.enrolled / g.total) * 100) : 0 })).sort((a, b) => b.total - a.total);
 }
+function revenueByTutor() {
+  const map = {};
+  state.records.forEach((r) => {
+    if (r.status !== "Enrolled") return;
+    const name = r.createdByName || "Unassigned";
+    map[name] = (map[name] || 0) + (parseFloat(r.feeOffered) || 0);
+  });
+  return Object.entries(map).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount);
+}
+
 function renderDashboard() {
   const host = document.getElementById("dashboardHost");
   if (!dashboardOpen) { host.innerHTML = ""; return; }
-  const totalRevenue = state.records.filter((r) => r.status === "Enrolled").reduce((sum, r) => sum + (parseFloat(r.feeOffered) || 0), 0);
+  const myName = profileName();
+  const tutorRevenue = revenueByTutor();
+  const myRevenue = tutorRevenue.find((t) => t.name === myName)?.amount || 0;
+  const teamRevenue = tutorRevenue.reduce((sum, t) => sum + t.amount, 0);
   const bySource = groupConversion("leadSource"), byCourse = groupConversion("courseInterest");
   const barRow = (label, total, enrolled, pct, color) => `<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px"><span style="font-weight:600">${esc(label)}</span><span style="color:var(--text-muted)">${enrolled}/${total} · <b style="color:${color}">${pct}%</b></span></div><div style="background:var(--surface-line);border-radius:999px;height:8px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${color};border-radius:999px"></div></div></div>`;
   const sourceRows = bySource.map((g) => barRow(g.name, g.total, g.enrolled, g.pct, courseColor(g.name))).join("") || `<p style="color:var(--text-faint);font-size:13px">No leads yet.</p>`;
   const courseRows = byCourse.map((g) => barRow(g.name, g.total, g.enrolled, g.pct, courseColor(g.name))).join("") || `<p style="color:var(--text-faint);font-size:13px">No leads yet.</p>`;
+  const maxRevenue = Math.max(1, ...tutorRevenue.map((t) => t.amount));
+  const tutorRows = tutorRevenue.map((t) => {
+    const pct = Math.round((t.amount / maxRevenue) * 100);
+    const isMe = t.name === myName;
+    const color = isMe ? "#12A594" : courseColor(t.name);
+    return `<div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px">
+        <span style="font-weight:${isMe ? "800" : "600"}">${esc(t.name)}${isMe ? " (you)" : ""}</span>
+        <span style="font-weight:800;color:${color}">₹${t.amount.toLocaleString("en-IN")}</span>
+      </div>
+      <div style="background:var(--surface-line);border-radius:999px;height:8px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${color};border-radius:999px"></div>
+      </div>
+    </div>`;
+  }).join("") || `<p style="color:var(--text-faint);font-size:13px">No enrollments yet.</p>`;
+
   host.innerHTML = `<div class="overlay" id="dashboardOverlay"><div class="modal" style="max-width:560px">
     <div class="modal-head"><h2>Business Dashboard</h2><button class="icon-btn" id="dashboardClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
-    <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594);margin-bottom:16px;opacity:1;transform:none">
-      <div class="stat-label">&#8377; Total Revenue (Enrolled)</div><div class="stat-value">₹${totalRevenue.toLocaleString("en-IN")}</div></div>
-    <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:8px">Conversion by Lead Source</div>${sourceRows}
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594);margin-bottom:12px;opacity:1;transform:none">
+      <div class="stat-label">&#8377; My Revenue (Enrolled)</div><div class="stat-value">₹${myRevenue.toLocaleString("en-IN")}</div></div>
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#5B5BFF,#4C4CFF);margin-bottom:16px;opacity:1;transform:none">
+      <div class="stat-label">&#128101; Whole Team Total</div><div class="stat-value">₹${teamRevenue.toLocaleString("en-IN")}</div></div>
+    <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:8px">Revenue by Tutor — kept separate, never mixed</div>${tutorRows}
+    <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Lead Source</div>${sourceRows}
     <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Course</div>${courseRows}
     <div class="modal-actions"><button class="btn btn-brass" id="dashboardDone">Close</button></div>
   </div></div>`;
