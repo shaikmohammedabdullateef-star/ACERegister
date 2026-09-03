@@ -166,6 +166,9 @@ function profileName() {
   return currentProfile?.full_name || currentUser?.email || "Someone";
 }
 function isAdmin() { return currentProfile?.role === "admin"; }
+/* Revenue visibility is intentionally locked to just this one email — the
+   business owner — not the broader "admin" role used elsewhere in the app. */
+function isOwner() { return isAdmin(); }
 function canEdit(r) {
   if (!isAuthorized) return false;
   if (isAdmin()) return true;
@@ -539,7 +542,7 @@ function recordCardHTML(r) {
         ${r.classMode ? `<span class="meta-item">${r.classMode === "Online" ? "&#128421;&#65039;" : "&#127963;&#65039;"} ${esc(r.classMode)}</span>` : ""}
         ${r.classType ? `<span class="meta-item">${r.classType === "Group" ? "&#128101;" : "&#128100;"} ${esc(r.classType)}</span>` : ""}
         ${r.classTiming ? `<span class="meta-item">&#128337; ${esc(r.classTiming)}</span>` : ""}
-        ${r.feeOffered ? `<span class="meta-item">&#8377; ${esc(r.feeOffered)}</span>` : ""}
+        ${(r.feeOffered && isAdmin()) ? `<span class="meta-item">&#8377; ${esc(r.feeOffered)}</span>` : ""}
         ${r.createdByName ? `<span class="meta-item" style="opacity:.75">&#128100; Added by ${esc(r.createdByName)}</span>` : ""}</div>
       ${r.feedback ? `<div class="feedback-row">&#128172; <span>${esc(r.feedback)}</span></div>` : ""}</div>
     <div class="record-right"><span class="follow-badge" style="color:${fc}"><span class="dot" style="background:${fc}"></span>${FOLLOW_LABEL[r.followedUp] || "Pending"}</span>
@@ -978,11 +981,13 @@ function renderDashboard() {
 
   host.innerHTML = `<div class="overlay" id="dashboardOverlay"><div class="modal" style="max-width:560px">
     <div class="modal-head"><h2>Business Dashboard</h2><button class="icon-btn" id="dashboardClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
-    <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594);margin-bottom:12px;opacity:1;transform:none">
+    <div class="stat-card" style="--grad:linear-gradient(135deg,#17C0AC,#12A594);margin-bottom:16px;opacity:1;transform:none">
       <div class="stat-label">&#8377; My Revenue (Enrolled)</div><div class="stat-value">₹${myRevenue.toLocaleString("en-IN")}</div></div>
+    ${isOwner() ? `
     <div class="stat-card" style="--grad:linear-gradient(135deg,#5B5BFF,#4C4CFF);margin-bottom:16px;opacity:1;transform:none">
       <div class="stat-label">&#128101; Whole Team Total</div><div class="stat-value">₹${teamRevenue.toLocaleString("en-IN")}</div></div>
-    <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:8px">Revenue by Tutor — kept separate, never mixed</div>${tutorRows}
+    <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:8px">Revenue by Tutor — admin view only</div>${tutorRows}
+    ` : ""}
     <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Lead Source</div>${sourceRows}
     <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Course</div>${courseRows}
     <div class="modal-actions"><button class="btn btn-brass" id="dashboardDone">Close</button></div>
@@ -994,8 +999,9 @@ function renderDashboard() {
 
 /* ---------- CSV export ---------- */
 function exportCSV() {
-  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Type", "Class Timing", "Fee Offered", "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
-  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.classMode, r.classType, r.classTiming, r.feeOffered, r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
+  const showFee = isAdmin();
+  const headers = ["Name", "Contact", "Email", "Lead Source", "Course", "Class Mode", "Class Type", "Class Timing", ...(showFee ? ["Fee Offered"] : []), "Status", "Followed Up", "Feedback", "Joining Date", "Renewal Date", "Lead Date", "Notes", "Added By"];
+  const rows = state.records.map((r) => [r.name, r.contact, r.email, r.leadSource, r.courseInterest, r.classMode, r.classType, r.classTiming, ...(showFee ? [r.feeOffered] : []), r.status, r.followedUp, r.feedback, r.joiningDate, r.renewalDate, r.createdAt, r.notes, r.createdByName || ""]);
   const csv = [headers, ...rows].map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
