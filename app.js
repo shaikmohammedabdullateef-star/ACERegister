@@ -440,8 +440,45 @@ function maybeNotifyRenewals() {
 }
 
 /* ---------- main render ---------- */
+let weeklySummaryDismissed = false;
+function weekKey() {
+  const d = new Date();
+  const onejan = new Date(d.getFullYear(), 0, 1);
+  const week = Math.ceil((((d - onejan) / 86400000) + onejan.getDay() + 1) / 7);
+  return `${d.getFullYear()}-W${week}`;
+}
+function renderWeeklySummary() {
+  const host = document.getElementById("weeklyHost");
+  if (!host) return;
+  const key = weekKey();
+  let seen = null;
+  try { seen = localStorage.getItem("ace_weekly_seen"); } catch (e) {}
+  if (weeklySummaryDismissed || seen === key) { host.innerHTML = ""; return; }
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 7);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const myName = profileName();
+  const relevant = state.records.filter((r) => r.createdAt >= cutoffStr && (isAdmin() || r.createdByName === myName));
+  const newLeads = relevant.length;
+  const enrolled = relevant.filter((r) => r.status === "Enrolled").length;
+  const revenue = relevant.filter((r) => r.status === "Enrolled").reduce((s, r) => s + (parseFloat(r.feeOffered) || 0), 0);
+  if (newLeads === 0) { host.innerHTML = ""; return; }
+  host.innerHTML = `<div class="banner banner-renew" style="flex-direction:column;align-items:flex-start;gap:6px">
+    <div style="display:flex;align-items:center;gap:8px;width:100%">
+      <span style="font-size:16px">&#128202;</span>
+      <b>${isAdmin() ? "Team's" : "Your"} last 7 days:</b>
+      <span>${newLeads} new lead${newLeads === 1 ? "" : "s"}, ${enrolled} enrolled${isAdmin() ? `, ₹${revenue.toLocaleString("en-IN")} revenue` : ""}</span>
+      <button class="banner-close" id="weeklyCloseBtn" style="margin-left:auto">&#10005; Dismiss</button>
+    </div>
+  </div>`;
+  document.getElementById("weeklyCloseBtn")?.addEventListener("click", () => {
+    weeklySummaryDismissed = true;
+    try { localStorage.setItem("ace_weekly_seen", key); } catch (e) {}
+    renderWeeklySummary();
+  });
+}
+
 function render() {
-  renderRenewalBanner(); renderStats(); renderToolbar(); renderRecords(); renderModal();
+  renderRenewalBanner(); renderWeeklySummary(); renderStats(); renderToolbar(); renderRecords(); renderModal();
 }
 function renderStats() {
   const s = computeStats();
@@ -754,6 +791,7 @@ function renderSchedule() {
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
       ${tutors.length > 1 ? `<select class="filter-select" id="scheduleTutorFilter">${tutorOpts}</select>` : ""}
+      ${scheduleView === "today" ? `<button class="btn btn-light" id="printTodayBtn">&#128424;&#65039; Print</button>` : ""}
       <button class="btn btn-brass" id="addSlotBtn" style="margin-left:auto">&#65291; Add Slot</button></div>
     ${bodyHTML}
     <div class="modal-actions"><button class="btn btn-light" id="scheduleDone">Close</button></div>
@@ -766,6 +804,7 @@ function renderSchedule() {
   document.getElementById("tabWeek").addEventListener("click", () => { scheduleView = "week"; renderSchedule(); });
   document.getElementById("scheduleTutorFilter")?.addEventListener("change", (e) => { scheduleTutorFilter = e.target.value; renderSchedule(); });
   document.getElementById("addSlotBtn").addEventListener("click", () => { if (!canAdd()) { showError("Please sign in to add a slot."); return; } scheduleEditing = emptySlot(); renderSchedule(); });
+  document.getElementById("printTodayBtn")?.addEventListener("click", () => printTodayRegister(filtered));
 
   filtered.forEach((s) => {
     document.getElementById(`slotedit-${s.id}`)?.addEventListener("click", () => { if (canEditSlot(s)) { scheduleEditing = { ...s }; renderSchedule(); } });
@@ -779,6 +818,48 @@ function renderSchedule() {
 }
 
 function slugify(s) { return String(s).replace(/[^a-zA-Z0-9]/g, "_"); }
+
+/* Opens a clean, paper-style printout of today's register — same shape
+   as the physical attendance sheet: No. / Student / Time / P-A / On-Off. */
+function printTodayRegister(filtered) {
+  const today = todayWeekdayName();
+  const slots = filtered.filter((s) => s.day_of_week === today).slice().sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+  const dateLabel = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric", weekday: "long" });
+  let rowNum = 0;
+  const rows = [];
+  slots.forEach((s) => {
+    const time = `${fmt12(s.start_time)} – ${fmt12(s.end_time)}`;
+    const names = s.student_names && s.student_names.length ? s.student_names : ["—"];
+    names.forEach((name) => {
+      rowNum++;
+      const pa = name === "—" ? "" : attendanceFor(s.id, name);
+      rows.push(`<tr><td>${rowNum}</td><td>${esc(name)}</td><td>${time}</td><td style="text-align:center">${pa}</td><td>${esc(s.mode)}${s.slot_type === "Group" ? " (Grp Batch)" : ""}</td></tr>`);
+    });
+  });
+  const win = window.open("", "_blank");
+  win.document.write(`<!DOCTYPE html><html><head><title>ACE Register — ${dateLabel}</title><style>
+    body{font-family:Georgia,serif;padding:24px;color:#111;}
+    h1{font-size:20px;text-align:center;margin-bottom:2px;}
+    p.sub{text-align:center;color:#555;margin-top:0;margin-bottom:20px;}
+    table{width:100%;border-collapse:collapse;font-size:13px;}
+    th,td{border:1px solid #333;padding:8px 6px;text-align:left;}
+    th{background:#eee;}
+  </style></head><body>
+    <h1>ACE SKILLS DEVELOPMENT CENTER</h1>
+    <p class="sub">${dateLabel}${scheduleTutorFilter !== "All" ? ` — ${esc(scheduleTutorFilter)}` : " — All Tutors"}</p>
+    <table><thead><tr><th>No</th><th>Student Name</th><th>Time</th><th>P/A</th><th>On/Off</th></tr></thead>
+    <tbody>${rows.join("") || `<tr><td colspan="5" style="text-align:center;color:#888">No classes today</td></tr>`}</tbody></table>
+    <script>window.print();<\/script>
+  </body></html>`);
+  win.document.close();
+}
+function fmt12(t) {
+  if (!t) return "";
+  const [h, m] = t.split(":").map(Number);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
+}
 
 /* "Today's Classes" — a daily register table like a paper attendance
    sheet: No. / Students (each with a tappable P/A mark) / Time / On-Off,
