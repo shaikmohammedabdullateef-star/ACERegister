@@ -420,15 +420,17 @@ function renderRenewalBanner() {
 let notified7 = false, notified3 = false;
 function maybeNotifyRenewals() {
   if (!currentUser || !("Notification" in window)) return;
-  const mine7 = upcomingRenewals(7, true);
-  const mine3 = upcomingRenewals(3, true);
+  const onlyMine = !isAdmin(); // admins get the whole team's renewals; tutors get only their own
+  const mine7 = upcomingRenewals(7, onlyMine);
+  const mine3 = upcomingRenewals(3, onlyMine);
   const today = todayStr();
   const fire = (list, key, title) => {
     if (!list.length || (key === "3" ? notified3 : notified7)) return;
     const storeKey = `ace_notif_${key}_${today}`;
     if (localStorage.getItem(storeKey)) { if (key === "3") notified3 = true; else notified7 = true; return; }
     const show = () => {
-      try { new Notification(title, { body: `${list.length} of your student${list.length > 1 ? "s" : ""}: ${list.map((x) => x.r.name).join(", ")}`, icon: "./icon-192.png" }); } catch (e) {}
+      const whose = onlyMine ? "your" : "the team's";
+      try { new Notification(title, { body: `${list.length} of ${whose} student${list.length > 1 ? "s" : ""}: ${list.map((x) => x.r.name).join(", ")}`, icon: "./icon-192.png" }); } catch (e) {}
       localStorage.setItem(storeKey, "1");
       if (key === "3") notified3 = true; else notified7 = true;
     };
