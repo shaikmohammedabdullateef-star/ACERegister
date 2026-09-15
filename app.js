@@ -235,8 +235,9 @@ function mapStudentRow(row) {
     id: row.id, name: row.name, contact: row.contact, email: row.email || "",
     leadSource: row.lead_source, courseInterest: row.course_interest,
     classMode: row.class_mode, classType: row.class_type, classTiming: row.class_timing || "",
-    feeOffered: row.fee_offered ?? "", status: row.status, followedUp: row.followed_up,
+    feeOffered: row.fee_offered ?? "", monthsPaid: row.months_paid ?? 1, status: row.status, followedUp: row.followed_up,
     feedback: row.feedback || "", joiningDate: row.joining_date || "", renewalDate: row.renewal_date || "",
+    nextRenewalDate: row.next_renewal_date || "",
     notes: row.notes || "", createdBy: row.created_by, createdByName: row.created_by_name,
     createdAt: row.created_at ? row.created_at.slice(0, 10) : todayStr(),
   };
@@ -247,8 +248,10 @@ function studentToRow(r) {
     lead_source: r.leadSource, course_interest: r.courseInterest,
     class_mode: r.classMode, class_type: r.classType, class_timing: r.classTiming || null,
     fee_offered: r.feeOffered !== "" && r.feeOffered != null ? parseFloat(r.feeOffered) : null,
+    months_paid: r.monthsPaid ? parseInt(r.monthsPaid, 10) : 1,
     status: r.status, followed_up: r.followedUp, feedback: r.feedback || null,
-    joining_date: r.joiningDate || null, renewal_date: r.renewalDate || null, notes: r.notes || null,
+    joining_date: r.joiningDate || null, renewal_date: r.renewalDate || null,
+    next_renewal_date: r.nextRenewalDate || null, notes: r.notes || null,
     created_by: r.createdBy, created_by_name: r.createdByName,
   };
 }
@@ -587,14 +590,16 @@ function recordCardHTML(r) {
     <div class="record-right"><span class="follow-badge" style="color:${fc}"><span class="dot" style="background:${fc}"></span>${FOLLOW_LABEL[r.followedUp] || "Pending"}</span>
       ${r.joiningDate ? `<span class="date-note">&#128197; Joined ${fmtDate(r.joiningDate)}</span>` : ""}
       ${r.renewalDate ? `<span class="renew-note" style="color:${renewSoon ? renewColor : "#8a8470"}">Renewal ${fmtDate(r.renewalDate)}${renewSoon ? (renewIn < 0 ? " · overdue" : ` · in ${renewIn}d`) : ""}</span>` : ""}
+      ${r.nextRenewalDate ? `<span class="date-note">&#128260; Next: ${fmtDate(r.nextRenewalDate)}</span>` : ""}
+      ${r.monthsPaid && parseInt(r.monthsPaid, 10) > 1 ? `<span class="date-note">&#128197; Paid for ${r.monthsPaid} months</span>` : ""}
       <div class="row-actions">${actions}</div></div></div></div>`;
 }
 
 /* ---------- add/edit modal ---------- */
 function emptyRecord() {
   return { id: uid(), name: "", contact: "", email: "", leadSource: state.sources[0] || "", courseInterest: state.courses[0] || "",
-    classMode: "Offline", classType: "Group", classTiming: "", feeOffered: "", feedback: "", followedUp: "Pending", status: "New Lead",
-    joiningDate: "", renewalDate: "", notes: "", createdAt: todayStr(), createdBy: null, createdByName: null };
+    classMode: "Offline", classType: "Group", classTiming: "", feeOffered: "", monthsPaid: 1, feedback: "", followedUp: "Pending", status: "New Lead",
+    joiningDate: "", renewalDate: "", nextRenewalDate: "", notes: "", createdAt: todayStr(), createdBy: null, createdByName: null };
 }
 function openAdd() {
   if (!canAdd()) { showError("Please sign in with an approved Google account before adding entries."); return; }
@@ -628,10 +633,12 @@ function renderModal() {
       <label class="field">Class type<select id="f_classtype"><option value="Group" ${r.classType === "Group" ? "selected" : ""}>Group</option><option value="One-on-One" ${r.classType === "One-on-One" ? "selected" : ""}>One-on-One</option></select></label>
       <label class="field">Class timing<input id="f_timing" value="${esc(r.classTiming || "")}" placeholder="e.g. 10–11 AM" /></label>
       <label class="field">Fee offered (₹)<input id="f_fee" type="number" value="${esc(r.feeOffered)}" /></label>
+      <label class="field">Paid for how many months?<input id="f_months" type="number" min="1" value="${esc(r.monthsPaid || 1)}" placeholder="e.g. 3" /></label>
       <label class="field">Status<select id="f_status">${statusOpts}</select></label>
       <label class="field">Followed up?<select id="f_follow">${followOpts}</select></label>
       <label class="field">Joining date<input id="f_joining" type="date" value="${esc(r.joiningDate)}" /></label>
       <label class="field">Renewal due date<input id="f_renewal" type="date" value="${esc(r.renewalDate)}" /></label>
+      <label class="field span2">Next renewal (after this one)<input id="f_nextrenewal" type="date" value="${esc(r.nextRenewalDate || "")}" /></label>
       <label class="field span2">Feedback<textarea id="f_feedback" rows="2">${esc(r.feedback)}</textarea></label>
       <label class="field span2">Notes<textarea id="f_notes" rows="2">${esc(r.notes)}</textarea></label>
     </div>
@@ -653,8 +660,10 @@ function renderModal() {
       leadSource: document.getElementById("f_source").value, courseInterest: document.getElementById("f_course").value,
       classMode: document.getElementById("f_classmode").value, classType: document.getElementById("f_classtype").value,
       classTiming: document.getElementById("f_timing").value.trim(), feeOffered: document.getElementById("f_fee").value,
+      monthsPaid: document.getElementById("f_months").value || 1,
       status: document.getElementById("f_status").value, followedUp: document.getElementById("f_follow").value,
       joiningDate: document.getElementById("f_joining").value, renewalDate: document.getElementById("f_renewal").value,
+      nextRenewalDate: document.getElementById("f_nextrenewal").value,
       feedback: document.getElementById("f_feedback").value, notes: document.getElementById("f_notes").value };
     if (addedByInput) updated.createdByName = addedByInput.value.trim();
     writeRecord(updated, isNew);
@@ -1035,6 +1044,29 @@ function revenueByTutor() {
   return Object.entries(map).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount);
 }
 
+/* A student who pays ₹15,000 for 3 months shows as ₹5,000 in each of
+   those 3 months here — not ₹15,000 dumped into the joining month. */
+function monthlyRevenueSpread(monthsBack) {
+  const totals = {};
+  const now = new Date();
+  for (let i = monthsBack - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    totals[`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`] = 0;
+  }
+  state.records.forEach((r) => {
+    if (r.status !== "Enrolled" || !r.joiningDate || !r.feeOffered) return;
+    const months = Math.max(1, parseInt(r.monthsPaid, 10) || 1);
+    const perMonth = (parseFloat(r.feeOffered) || 0) / months;
+    const start = new Date(r.joiningDate + "T00:00:00");
+    for (let i = 0; i < months; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth() + i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      if (key in totals) totals[key] += perMonth;
+    }
+  });
+  return Object.entries(totals);
+}
+
 function renderDashboard() {
   const host = document.getElementById("dashboardHost");
   if (!dashboardOpen) { host.innerHTML = ""; return; }
@@ -1061,6 +1093,19 @@ function renderDashboard() {
       </div>
     </div>`;
   }).join("") || `<p style="color:var(--text-faint);font-size:13px">No enrollments yet.</p>`;
+  const monthly = monthlyRevenueSpread(6);
+  const maxMonthly = Math.max(1, ...monthly.map(([, v]) => v));
+  const monthBars = `<div style="display:flex;align-items:flex-end;gap:8px;height:110px;padding-top:10px">
+    ${monthly.map(([ym, amt]) => {
+      const [y, m] = ym.split("-");
+      const label = new Date(parseInt(y, 10), parseInt(m, 10) - 1, 1).toLocaleDateString("en-IN", { month: "short" });
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+        <div style="font-size:10px;font-weight:700;color:var(--inkwell)">₹${Math.round(amt / 1000)}k</div>
+        <div style="width:100%;max-width:30px;height:${Math.max(4, (amt / maxMonthly) * 80)}px;background:linear-gradient(180deg,#17C0AC,#12A594);border-radius:5px 5px 2px 2px"></div>
+        <div style="font-size:10px;color:var(--text-faint)">${label}</div>
+      </div>`;
+    }).join("")}
+  </div>`;
 
   host.innerHTML = `<div class="overlay" id="dashboardOverlay"><div class="modal" style="max-width:560px">
     <div class="modal-head"><h2>Business Dashboard</h2><button class="icon-btn" id="dashboardClose" style="border-color:#8a847033;color:#8a8470">&#10005;</button></div>
@@ -1070,6 +1115,7 @@ function renderDashboard() {
     <div class="stat-card" style="--grad:linear-gradient(135deg,#5B5BFF,#4C4CFF);margin-bottom:16px;opacity:1;transform:none">
       <div class="stat-label">&#128101; Whole Team Total</div><div class="stat-value">₹${teamRevenue.toLocaleString("en-IN")}</div></div>
     <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin-bottom:8px">Revenue by Tutor — admin view only</div>${tutorRows}
+    <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 4px">Monthly Revenue (multi-month payments spread evenly)</div>${monthBars}
     ` : ""}
     <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Lead Source</div>${sourceRows}
     <div style="font-family:var(--font-display);font-weight:700;font-size:14px;margin:16px 0 8px">Conversion by Course</div>${courseRows}
