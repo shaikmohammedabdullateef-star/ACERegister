@@ -35,3 +35,30 @@ self.addEventListener("fetch", (e) => {
       .catch(() => caches.match(e.request).then((cached) => cached || caches.match("./index.html")))
   );
 });
+
+// Shows a real notification even when the app is fully closed. The
+// Edge Function sends a JSON payload like {title, body, url}.
+self.addEventListener("push", (e) => {
+  let data = { title: "ACE Register", body: "You have an update." };
+  try { data = e.data.json(); } catch (err) {}
+  e.waitUntil(
+    self.registration.showNotification(data.title || "ACE Register", {
+      body: data.body || "",
+      icon: "./icon-192.png",
+      badge: "./icon-192.png",
+      data: { url: data.url || "./" },
+    })
+  );
+});
+
+// Tapping the notification opens the app (or focuses it if already open).
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const targetUrl = e.notification.data?.url || "./";
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) { if ("focus" in client) return client.focus(); }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+    })
+  );
+});

@@ -77,6 +77,8 @@ header.cover{
   background:linear-gradient(120deg, var(--header-1) 0%, var(--header-2) 42%, var(--header-3) 72%, var(--header-4) 100%);
   background-size:220% 220%;
   animation:gradientShift 16s ease infinite;
+  position:sticky; top:0; z-index:40;
+  transition:box-shadow .3s ease, padding .3s ease;
   padding:26px 16px 22px;
   box-shadow:0 6px 30px rgba(0,0,0,0.28);
   position:relative;
@@ -229,6 +231,13 @@ select.filter-select{padding:8px 26px 8px 9px;border:1px solid var(--surface-lin
 .field{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:var(--text-muted);}
 .field input,.field select,.field textarea{padding:8px 10px;border:1px solid var(--surface-line);border-radius:9px;font-size:13px;color:var(--text-main);width:100%;background:var(--surface-solid);transition:border-color .2s ease, box-shadow .2s ease;}
 .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--inkwell);box-shadow:0 0 0 4px rgba(76,76,255,0.12);}
+.field input:focus,.field select:focus{transform:scale(1.008);}
+
+header.cover.scrolled{box-shadow:0 10px 30px rgba(0,0,0,0.28);}
+
+@keyframes shimmer{0%{background-position:-200% 0;}100%{background-position:200% 0;}}
+.skeleton{background:linear-gradient(90deg,var(--surface-line) 25%,var(--surface) 50%,var(--surface-line) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:8px;}
+@media (prefers-reduced-motion: reduce){ .skeleton{animation:none;} }
 .field textarea{resize:vertical;}
 .span2{grid-column:1/-1;}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}

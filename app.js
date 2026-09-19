@@ -1171,9 +1171,66 @@ function initSoundUI() {
 function applyTheme(name) { document.documentElement.setAttribute("data-theme", name); try { localStorage.setItem("ace_theme", name); } catch (e) {} ["Default", "Light", "Dark"].forEach((n) => document.getElementById(`theme${n}`)?.classList.toggle("active", n.toLowerCase() === name)); }
 function initThemeUI() { let saved = "default"; try { saved = localStorage.getItem("ace_theme") || "default"; } catch (e) {} applyTheme(saved); document.getElementById("themeDefault").addEventListener("click", () => applyTheme("default")); document.getElementById("themeLight").addEventListener("click", () => applyTheme("light")); document.getElementById("themeDark").addEventListener("click", () => applyTheme("dark")); }
 
+/* ---------- push notifications (arrive even with the app closed) ---------- */
+const VAPID_PUBLIC_KEY = "BFcGnIOdLTgYBHyOU34Kkh3BqIQhtTVdzjs7VWBk98t2xUanbLSPbgoq7c6i-cfw0llnt0K7nTjjXw_SWtMoujY";
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+function renderPushBtn() {
+  const btn = document.getElementById("pushBtn");
+  if (!btn) return;
+  const supported = "serviceWorker" in navigator && "PushManager" in window;
+  if (!supported) { btn.style.display = "none"; return; }
+  const enabled = Notification.permission === "granted" && localStorage.getItem("ace_push_on") === "1";
+  btn.innerHTML = enabled ? "&#128276; Notifications On" : "&#128276; Notify Me";
+  btn.style.opacity = enabled ? "1" : ".75";
+}
+async function togglePush() {
+  if (!currentUser) { showError("Please sign in first to enable notifications."); return; }
+  const enabled = Notification.permission === "granted" && localStorage.getItem("ace_push_on") === "1";
+  if (enabled) {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await sb.from("push_subscriptions").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); }
+    } catch (e) {}
+    localStorage.setItem("ace_push_on", "0");
+    renderPushBtn();
+    return;
+  }
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { showError("Notifications weren't allowed — you can turn them on later from your phone's browser settings."); return; }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+    }
+    const raw = sub.toJSON();
+    await sb.from("push_subscriptions").upsert({
+      user_id: currentUser.id, endpoint: raw.endpoint, p256dh: raw.keys.p256dh, auth: raw.keys.auth,
+    }, { onConflict: "endpoint" });
+    localStorage.setItem("ace_push_on", "1");
+    playSuccess();
+    renderPushBtn();
+  } catch (e) {
+    showError("Couldn't turn on notifications — try again, or check your phone's notification permissions for this site.");
+  }
+}
+function initPushUI() {
+  renderPushBtn();
+  document.getElementById("pushBtn")?.addEventListener("click", togglePush);
+}
+
 /* ---------- init ---------- */
 document.addEventListener("DOMContentLoaded", async () => {
-  initSoundUI(); initThemeUI();
+  initSoundUI(); initThemeUI(); initPushUI();
   document.getElementById("addBtn").addEventListener("click", openAdd);
   document.getElementById("exportBtn").addEventListener("click", exportCSV);
   document.getElementById("customizeBtn").addEventListener("click", () => { if (!canAdd()) { showError("Please sign in to customize the register."); return; } settingsOpen = true; renderSettings(); });
@@ -1181,6 +1238,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("attendanceBtn").addEventListener("click", openAttendanceBtn);
   document.getElementById("dashboardBtn").addEventListener("click", openDashboardBtn);
   document.getElementById("targetsBtn").addEventListener("click", openTargetsBtn);
+
+  const headerEl = document.querySelector("header.cover");
+  window.addEventListener("scroll", () => { if (headerEl) headerEl.classList.toggle("scrolled", window.scrollY > 12); }, { passive: true });
 
   render();
   await initAuth();
